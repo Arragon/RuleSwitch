@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "composite": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.build.tsbuildinfo"
+  },
+  "exclude": ["src/**/*.test.ts", "src/**/__tests__/**"]
+}

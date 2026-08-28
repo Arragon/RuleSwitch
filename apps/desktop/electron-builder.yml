@@ -1,0 +1,19 @@
+appId: com.ruleswitch.desktop
+productName: RuleSwitch
+asar: true
+directories:
+  output: ../../release
+files:
+  - out/**/*
+  - package.json
+win:
+  target:
+    - nsis
+mac:
+  target:
+    - dmg
+    - zip
+linux:
+  target:
+    - AppImage
+    - deb

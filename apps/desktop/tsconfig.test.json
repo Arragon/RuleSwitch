@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "types": ["node"]
+  },
+  "include": [
+    "src/main/application/**/*.ts",
+    "src/main/infrastructure/node-filesystem.ts",
+    "src/main/infrastructure/storage.ts",
+    "../../tests/integration/walking-skeleton.integration.test.ts"
+  ]
+}

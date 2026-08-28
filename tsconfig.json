@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/rulesync-provider" },
+    { "path": "./packages/ui" },
+    { "path": "./apps/desktop" }
+  ]
+}

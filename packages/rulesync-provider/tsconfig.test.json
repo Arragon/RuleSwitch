@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../tests/fixtures/rulesync-provider/**/*.ts",
+    "../../tests/integration/rulesync-provider.integration.test.ts"
+  ]
+}

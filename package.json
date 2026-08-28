@@ -1,0 +1,29 @@
+{
+  "name": "ruleswitch",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": "11.24.0"
+  },
+  "scripts": {
+    "dev": "corepack pnpm -r --parallel --if-present run dev",
+    "build": "corepack pnpm -r --if-present run build",
+    "typecheck": "corepack pnpm -r --if-present run typecheck",
+    "lint": "eslint .",
+    "test": "corepack pnpm run test:unit && corepack pnpm run test:integration",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.2",
+    "@playwright/test": "catalog:",
+    "eslint": "9.39.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.68.0",
+    "vitest": "4.0.18"
+  }
+}
