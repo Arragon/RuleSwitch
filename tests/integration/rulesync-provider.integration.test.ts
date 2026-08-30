@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,6 +152,36 @@ describe("RulesyncProvider with Rulesync 16.14.0", () => {
     );
     expect(path.dirname(generatedAgainPath)).not.toBe(path.dirname(generatedAbsolutePath));
     expect(await readFile(agentsPath)).toEqual(agentsBefore);
+  });
+
+  test("discovers every current Rulesync source format for the shared file browser", async () => {
+    const context = await createTestContext();
+    await mkdir(path.join(context.workspaceRoot, ".rulesync", "skills", "review"), { recursive: true });
+    await mkdir(path.join(context.workspaceRoot, ".rulesync", "commands"), { recursive: true });
+    await mkdir(path.join(context.workspaceRoot, ".rulesync", "mcp"), { recursive: true });
+    await mkdir(path.join(context.workspaceRoot, ".rulesync", "settings"), { recursive: true });
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "skills", "review", "SKILL.md"), "# Review\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "commands", "check.yaml"), "name: check\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "mcp", "servers.jsonc"), "{ // safe\n}\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "settings", "project.toml"), "enabled = true\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "notes.txt"), "notes\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "opaque.conf"), "opaque\n");
+
+    const detection = await context.provider.detect({
+      workspaceId: WORKSPACE_ID,
+      rootResourceId: context.rootResourceId
+    });
+    if (!detection.detected) throw new Error("Expected the expanded Rulesync tree to be detected.");
+
+    expect(detection.sourceResources.map(({ logicalPath, format }) => [logicalPath, format])).toEqual([
+      ["commands/check.yaml", "yaml"],
+      ["mcp/servers.jsonc", "jsonc"],
+      ["notes.txt", "text"],
+      ["opaque.conf", "unknown"],
+      ["rules/base.md", "markdown"],
+      ["settings/project.toml", "toml"],
+      ["skills/review/SKILL.md", "markdown"]
+    ]);
   });
 
   test("previews a create when AGENTS.md does not exist", async () => {

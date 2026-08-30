@@ -13,7 +13,9 @@
 - Walking skeleton 已实现并在 Windows 真实 Electron/Playwright 上走通：Open、Raw/Rendered、default open、Rulesync staging、Monaco Diff、Apply/Verify/History/Restore。
 - 当前验证记录：unit 35、integration 13、E2E 1；中文+空格 workspace 可用，BOM+CRLF 精确恢复，unknown file 不变；integration 还覆盖 create/delete/反向 Restore ownership、commit metadata failure rollback、tampered snapshot traversal。
 - macOS/Linux 未测试；fixture/abstraction 不等于 native support。
-- Phase A 仅有 `codexcli/rules` 单 target，UI 只展示 ChangeSet 第一项；无 watcher/auto refresh，`chokidar` 尚未依赖，留待 Phase B。
+- 当前仍仅有 `codexcli/rules` 单 target。v1-compatible Phase B UI 已按 Rules / Skills / Commands / MCP / Other 浏览全部 source，并可选择 ChangeSet 全部文件；统一只读 Viewer 支持 Markdown、JSON/JSONC、YAML、TOML、text 与 origin metadata。
+- Markdown frontmatter 使用原始文本与正文分区展示；raw HTML 不解析，所有链接继续 inert，避免在没有 link capability 时从 Renderer 建立旁路。
+- 无 watcher/auto refresh，`chokidar` 尚未依赖。显式 `readResource` 会重新 stat/read/hash，Apply preflight 能拒绝 stale source/target，但这不等于 watcher UX。
 
 ## Rulesync 16.14.0
 

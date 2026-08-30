@@ -19,7 +19,7 @@ Open Workspace
 → transactional Restore
 ```
 
-这是一个真实、安全的最小纵切，不是完整 v0.1。当前仅支持一个 Universal Rulesync profile、`codexcli` 的 `rules` feature；UI 只展示 ChangeSet 第一项。没有 watcher/external-change auto refresh、多 target UI、跨重启 history rebind 或 recovery repair UI。
+这是一个真实、安全的最小纵切，不是完整 v0.1。当前仅支持一个 Universal Rulesync profile、`codexcli` 的 `rules` feature；v1-compatible Phase B UI 已增加按 Rules / Skills / Commands / MCP / Other 分组的全 source browser、统一多格式只读 Viewer、frontmatter/Markdown 分区预览，以及全 ChangeSet 文件选择。没有 watcher/external-change auto refresh、Recent Workspace/Profile persistence、多 target UI、跨重启 history rebind 或 recovery repair UI；被冻结 IPC 阻塞的能力记录在 Proposed ADR-0005。
 
 ## Architecture
 

@@ -68,7 +68,9 @@ Revision 对 raw bytes 做 SHA-256。`RevisionAggregate` serialization 是 `rule
 
 Renderer 通过 `window.ruleswitch` 的 7-method `DesktopApi` 工作，不直接接触 Node/Electron/path。`packages/ui/src/app.tsx` 实现三段工作台：source 列表与 Raw/Rendered/Open External；Generated/Diff/Apply；History/Restore。Raw、Generated 使用只读 Monaco Editor，Diff 使用 Monaco DiffEditor；Markdown 使用 GFM + sanitize，link 被替换为 inert text。
 
-Phase A UI 只展示 `ChangeSet.changes[0]` 的 generated/diff，虽然 transaction 层可处理整个 ChangeSet。Watcher、外部修改自动刷新和更完整的 file/change browser 属于 Phase B。Monaco 当前 bundle 较大，后续需在不破坏功能的前提下优化。
+Phase B 的 v1-compatible 部分已将 source resources 按 Rules / Skills / Commands / MCP / Other 组织，并以统一只读 Viewer 按 `FileResource.format` 提供 Markdown、JSON/JSONC、YAML、TOML 与 text 高亮；Markdown frontmatter 与正文分区展示，raw HTML 不执行，链接仍保持 inert。Changes 区可选择全部 `ChangeSet.changes`，复用同一 Viewer 显示 generated/workspace origin 与 Diff。
+
+Recent Workspaces、Profile CRUD/switch/persistence、Edit/Save、watcher 主动 invalidation、授权 Markdown links、Reveal 和 snapshot browsing 仍不能由冻结的 7-method IPC 表达，未建立旁路。所需 versioned capability/storage migration 见 Proposed ADR-0005。Monaco bundle 当前仍较大。
 
 所有 UI 任务开始前阅读 `docs/UI-Design-manual.md`；同一界面只能有一个 generative visual-design authority，其余工具仅审查或做专项建议。
 
@@ -143,8 +145,9 @@ Internal snapshot manifest 当前为 version 2：除 public `Snapshot` 的 raw b
 
 ## 12. Remaining Phase A Boundaries and Risks
 
-- 无 watcher/external-change auto refresh；Phase B 实现。现有 stale preflight 会在 Apply 前拒绝外部修改。
-- 仅支持 Rulesync `codexcli` + `rules` 单 target；UI 只展示 ChangeSet 第一项。
+- 无 watcher/external-change auto refresh；现有 7-method IPC 没有 invalidation event。显式重新读取会 stat/read/hash，Apply stale preflight 仍拒绝外部 source/target 修改。
+- 仅支持 Rulesync `codexcli` + `rules` 单 target；UI 已可选择 ChangeSet 全部文件，但 target/feature selection 尚未实现。
+- Recent Workspace persistence/reopen、Profile lifecycle、Edit/Save、authorized Markdown links、Reveal 与 snapshot browsing 等待 ADR-0005 的 L4 capability/storage 决策。
 - Workspace ID 按 session 随机；跨重启 history rebind 尚未实现。
 - 完整 crash repair 仍是 P2：当前只有 manifest scan、root identity matching 与 mutation gate，没有 repair/diagnostics UI。
 - Path-based write 的 check/use TOCTOU 仍是 P2；canonical/realpath/preflight 复验只缩小风险，不宣称消除竞态。

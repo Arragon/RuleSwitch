@@ -31,6 +31,12 @@ const ORIGINAL_AGENTS = new Uint8Array([
 ]);
 const UNKNOWN_BYTES = new TextEncoder().encode("unknown-file-must-remain\r\n");
 
+class DeniedWorkspaceFilesystem extends NodeFilesystemInfrastructure {
+  override async registerWorkspaceRoot(): Promise<string> {
+    throw Object.assign(new Error("denied"), { code: "EACCES" });
+  }
+}
+
 class FailingHistoryStores extends DesktopStores {
   private shouldFail = true;
 
@@ -85,6 +91,70 @@ afterEach(async () => {
 });
 
 describe("desktop production walking skeleton", () => {
+  test("distinguishes moved and permission-denied workspace failures without exposing a path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ruleswitch-workspace-errors-"));
+    temporaryRoots.push(root);
+    const appDataRoot = path.join(root, "app-data");
+    const movedPlatform = new TestPlatformService(
+      [{ selectedRoot: path.join(root, "moved-workspace"), displayName: "Moved" }],
+      appDataRoot
+    );
+    const movedFilesystem = new NodeFilesystemInfrastructure(appDataRoot);
+    const movedApplication = new RuleSwitchApplication(
+      movedPlatform,
+      movedFilesystem,
+      new RulesyncProvider(movedFilesystem),
+      new DesktopStores(appDataRoot)
+    );
+    await expect(movedApplication.openWorkspace()).rejects.toMatchObject({
+      code: "WORKSPACE_UNAVAILABLE",
+      message: "The selected workspace is unavailable or has moved.",
+      retryable: true
+    });
+
+    const deniedPlatform = new TestPlatformService(
+      [{ selectedRoot: root, displayName: "Denied" }],
+      appDataRoot
+    );
+    const deniedFilesystem = new DeniedWorkspaceFilesystem(appDataRoot);
+    const deniedApplication = new RuleSwitchApplication(
+      deniedPlatform,
+      deniedFilesystem,
+      new RulesyncProvider(deniedFilesystem),
+      new DesktopStores(appDataRoot)
+    );
+    await expect(deniedApplication.openWorkspace()).rejects.toMatchObject({
+      code: "WORKSPACE_UNAVAILABLE",
+      message: "Permission to read the selected workspace was denied.",
+      retryable: true
+    });
+  });
+
+  test("re-reads and hashes a source after an external modification before rejecting stale apply", async () => {
+    const context = await createApplication();
+    const agentsPath = path.join(context.workspaceRoot, "AGENTS.md");
+    const agentsBefore = await readFile(agentsPath);
+    const session = await context.application.openWorkspace();
+    const source = session.sourceResources[0];
+    if (source === undefined) throw new Error("Expected source resource.");
+    const changeSet = await context.application.stageTarget(
+      session.workspace.id,
+      session.profile.id,
+      source.id,
+      session.target.id
+    );
+    const externalSource = new TextEncoder().encode("# Externally edited source\n");
+    await writeFile(path.join(context.workspaceRoot, ".rulesync", "rules", "base.md"), externalSource);
+
+    const refreshed = await context.application.readResource(source.id);
+    expect(Buffer.from(refreshed.content)).toEqual(Buffer.from(externalSource));
+    expect(refreshed.resource.hash.digest).not.toBe(source.hash.digest);
+    await expect(context.application.applyChangeSet(changeSet.id)).rejects.toMatchObject({
+      code: "STALE_CHANGE_SET"
+    });
+    expect(await readFile(agentsPath)).toEqual(agentsBefore);
+  });
+
   test("opens, reads, stages, applies, records history, and restores exact raw bytes", async () => {
     const context = await createApplication();
     const unknownPath = path.join(context.workspaceRoot, "unmanaged.bin");

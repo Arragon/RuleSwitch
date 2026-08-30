@@ -144,6 +144,24 @@ describe("logical path schema", () => {
     expect(logicalPathSchema.safeParse(logicalPath).success).toBe(false);
   });
 
+  it("keeps Windows and POSIX absolute paths outside the provider-neutral contract", () => {
+    for (const operatingSystemPath of [
+      "C:\\Users\\dev\\.rulesync\\rules\\base.md",
+      "C:/Users/dev/.rulesync/rules/base.md",
+      "\\\\server\\share\\rules\\base.md",
+      "/home/dev/project/.rulesync/rules/base.md"
+    ]) {
+      expect(logicalPathSchema.safeParse(operatingSystemPath).success).toBe(false);
+    }
+    expect(logicalPathSchema.safeParse("rules/Windows fixture.md").success).toBe(true);
+    expect(logicalPathSchema.safeParse("rules/posix-fixture.md").success).toBe(true);
+  });
+
+  it("treats differently-cased logical paths as distinct values at the domain boundary", () => {
+    expect(logicalPathSchema.parse("Rules/Base.md")).toBe("Rules/Base.md");
+    expect(logicalPathSchema.parse("rules/base.md")).toBe("rules/base.md");
+  });
+
   it("applies the same invariant to FileResource", () => {
     expect(
       fileResourceSchema.safeParse({

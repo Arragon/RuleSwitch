@@ -96,8 +96,8 @@ export class RuleSwitchApplication {
         workspaceId,
         selection.selectedRoot
       );
-    } catch {
-      throw new ApplicationError("WORKSPACE_UNAVAILABLE", "The selected workspace is unavailable.");
+    } catch (error) {
+      throw workspaceUnavailableError(error);
     }
 
     let detection;
@@ -1108,6 +1108,28 @@ function sameAggregate(
 
 function opaqueId(kind: string): string {
   return `${kind}_${randomBytes(24).toString("base64url")}`;
+}
+
+function workspaceUnavailableError(error: unknown): ApplicationError {
+  const code =
+    error instanceof Error && "code" in error && typeof error.code === "string"
+      ? error.code
+      : null;
+  if (code === "EACCES" || code === "EPERM") {
+    return new ApplicationError(
+      "WORKSPACE_UNAVAILABLE",
+      "Permission to read the selected workspace was denied.",
+      true
+    );
+  }
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return new ApplicationError(
+      "WORKSPACE_UNAVAILABLE",
+      "The selected workspace is unavailable or has moved.",
+      true
+    );
+  }
+  return new ApplicationError("WORKSPACE_UNAVAILABLE", "The selected workspace is unavailable.", true);
 }
 
 function toApplicationError(error: unknown): ApplicationError {

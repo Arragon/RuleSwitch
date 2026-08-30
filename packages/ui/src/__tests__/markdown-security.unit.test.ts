@@ -25,7 +25,11 @@ describe("MarkdownPreview security", () => {
 
 [file link](file:///etc/passwd)
 
-[https link](https://example.com)`
+[relative link](../outside.md)
+
+[https link](https://example.com)
+
+[unknown link](custom:payload)`
       })
     );
     const html = rawHtml + links;
@@ -34,6 +38,21 @@ describe("MarkdownPreview security", () => {
     expect(html).not.toMatch(/<script|<img|<a\b/i);
     expect(html).not.toMatch(/onerror|onclick|javascript:|data:text\/html|file:\/\//i);
     expect(html).toContain("https link");
+    expect(html).toContain("relative link");
+    expect(html).toContain("unknown link");
     expect(html).toContain("markdown-static-link");
+  });
+
+  test("shows frontmatter as metadata and renders only the Markdown body", () => {
+    const html = renderToStaticMarkup(
+      createElement(MarkdownPreview, {
+        content: "---\nroot: true\ndescription: Safe metadata\n---\n# Rendered body\n"
+      })
+    );
+
+    expect(html).toContain("Metadata");
+    expect(html).toContain("root: true");
+    expect(html).toContain("Rendered body");
+    expect(html.match(/<hr/g)).toBeNull();
   });
 });
