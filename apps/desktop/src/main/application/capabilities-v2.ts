@@ -17,6 +17,7 @@ import type {
   ProjectBindRequest,
   ProjectBindingOutcome,
   ProjectDto,
+  RecoveryReadModel,
   RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
@@ -519,13 +520,19 @@ export class CapabilityServiceV2 {
     // from the M5 classifier facts (installed/mapping/supported/writable).
     const registrations = this.options.harnessRegistry?.listRegistrations() ?? [];
     return registrations
-      .map((registration) => ({
-        harnessInstanceId: registration.harnessInstanceId,
-        adapterId: registration.adapterId,
-        displayName: registration.displayName,
-        installed: registration.installed,
-        readiness: registration.installed ? "READY" : "not-installed"
-      }))
+      .map((registration) => {
+        const kinds = matrixKindsFor(registration.adapterId);
+        return {
+          harnessInstanceId: registration.harnessInstanceId,
+          adapterId: registration.adapterId,
+          displayName: registration.displayName,
+          installed: registration.installed,
+          readiness: registration.installed ? "READY" : "not-installed",
+          // Honest capability surface: only kinds this adapter can write.
+          globalKinds: kinds.filter((row) => row.global === "read-write").map((row) => row.kind),
+          projectKinds: kinds.filter((row) => row.project === "read-write").map((row) => row.kind)
+        };
+      })
       .sort((left, right) => (left.displayName < right.displayName ? -1 : 1));
   }
 
@@ -543,6 +550,49 @@ export class CapabilityServiceV2 {
         }))
       }))
       .sort((left, right) => (right.updatedAt < left.updatedAt ? -1 : 1));
+  }
+
+  /**
+   * Batches needing operator attention (INH-1821). Deliberately does not
+   * offer rollback: the pre-apply snapshot payload is not persisted yet, so
+   * a "restore" button would be a lie. Guidance points at Git instead.
+   */
+  async recoveryStatus(): Promise<RecoveryReadModel> {
+    const batches = this.options.operationsStore.listAllBatches().filter(
+      (journal) =>
+        journal.status !== "ALL_COMMITTED" ||
+        journal.entries.some(
+          (entry) =>
+            entry.state === "PREFLIGHT_FAILED" ||
+            entry.state === "APPLY_FAILED" ||
+            entry.state === "VERIFY_FAILED" ||
+            entry.state === "ROLLBACK_FAILED"
+        )
+    );
+    return {
+      batches: batches.map((journal) => ({
+        batchId: journal.batchId,
+        planId: journal.planId,
+        status: journal.status,
+        startedAt: journal.startedAt,
+        updatedAt: journal.updatedAt,
+        targets: journal.entries
+          .filter((entry) => entry.state !== "COMMITTED")
+          .map((entry) => ({
+            targetKey: entry.targetKey,
+            mode: entry.mode,
+            state: entry.state,
+            detail: entry.failureDetail
+          })),
+        rollbackAvailable: false,
+        rollbackReason:
+          "pre-apply snapshot payloads are not persisted in this version, so automated rollback cannot be offered",
+        guidance:
+          journal.status === "RECOVERY_REQUIRED"
+            ? "该批次无法自证回滚。请用 Git 恢复受影响文件，确认真实状态后再重新应用。"
+            : "有目标未完成或被拒绝。核对下方每个目标的状态，修正原因后重新预览并应用。"
+      }))
+    };
   }
 
   async getSettings(): Promise<SettingsReadModel> {
@@ -893,7 +943,15 @@ export class CapabilityServiceV2 {
           batchId: journal.batchId
         });
       } else {
-        entry.state = "APPLY_FAILED";
+        // Distinguish preflight refusals from write/verify failures so the
+        // recovery surface can tell the operator what actually happened.
+        entry.state =
+          applied.code === "FIRST_ADOPTION_CONFIRMATION_REQUIRED" ||
+          applied.code === "UNMANAGED_TARGET_CHANGED"
+            ? "PREFLIGHT_FAILED"
+            : applied.code === "VERIFY_FAILED"
+              ? "VERIFY_FAILED"
+              : "APPLY_FAILED";
         entry.failureDetail = applied.message;
         // Frozen batch rule: a failing target stops not-yet-started targets.
         break;
@@ -930,7 +988,11 @@ export class CapabilityServiceV2 {
         (entry) => entry.state === "SKIPPED_BLOCKED" && entry.action !== "noop"
       ).length,
       failedCount: outcomes.filter(
-        (entry) => entry.state === "APPLY_FAILED" || entry.state === "VERIFY_FAILED"
+        (entry) =>
+          entry.state === "APPLY_FAILED" ||
+          entry.state === "PREFLIGHT_FAILED" ||
+          entry.state === "VERIFY_FAILED" ||
+          entry.state === "ROLLBACK_FAILED"
       ).length,
       entries: outcomes
     };

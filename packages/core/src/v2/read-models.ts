@@ -90,6 +90,10 @@ export interface HarnessDto {
   readonly displayName: string;
   readonly installed: boolean;
   readonly readiness: string;
+  /** Asset kinds this harness can actually write at global scope. */
+  readonly globalKinds: readonly string[];
+  /** Asset kinds this harness can actually write at project scope. */
+  readonly projectKinds: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +117,35 @@ export interface OverviewReadModel {
   readonly projectCount: number;
   readonly harnessCount: number;
   readonly libraryDrafts: number;
+}
+
+/** One target inside a batch that did not fully succeed (INH-1821). */
+export interface RecoveryTargetDto {
+  readonly targetKey: string;
+  readonly mode: string;
+  readonly state: string;
+  readonly detail: string | null;
+}
+
+export interface RecoveryBatchDto {
+  readonly batchId: string;
+  readonly planId: string;
+  readonly status: string;
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly targets: readonly RecoveryTargetDto[];
+  /**
+   * Automated rollback needs the pre-apply snapshot payload, which this
+   * version does not persist. False means the UI must not offer it.
+   */
+  readonly rollbackAvailable: boolean;
+  readonly rollbackReason: string | null;
+  /** Actionable next step for the operator. */
+  readonly guidance: string;
+}
+
+export interface RecoveryReadModel {
+  readonly batches: readonly RecoveryBatchDto[];
 }
 
 export interface SettingsReadModel {

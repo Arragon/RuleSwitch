@@ -173,6 +173,10 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["history.operations"], {})) as Awaited<
       ReturnType<DesktopApiV2["operationHistory"]>
     >,
+  recoveryStatus: async () =>
+    unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["history.recovery"], {})) as Awaited<
+      ReturnType<DesktopApiV2["recoveryStatus"]>
+    >,
   getSettings: async () =>
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["settings.get"], {})) as Awaited<
       ReturnType<DesktopApiV2["getSettings"]>

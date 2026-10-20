@@ -12,6 +12,7 @@ import type {
   LibraryReadModel,
   OverviewReadModel,
   ProjectDto,
+  RecoveryReadModel,
   HarnessDto,
   OperationHistoryDto,
   RepositoryValidation,
@@ -115,6 +116,7 @@ export function AppV2({ api }: AppV2Props) {
   const [projects, setProjects] = useState<readonly ProjectDto[]>([]);
   const [harnesses, setHarnesses] = useState<readonly HarnessDto[]>([]);
   const [operations, setOperations] = useState<readonly OperationHistoryDto[]>([]);
+  const [recovery, setRecovery] = useState<RecoveryReadModel | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -196,6 +198,7 @@ export function AppV2({ api }: AppV2Props) {
         });      case "history":
         return safeRun(async () => {
           setOperations(await api.operationHistory());
+          setRecovery(await api.recoveryStatus());
         });
       case "settings":
         return safeRun(async () => {
@@ -957,17 +960,35 @@ export function AppV2({ api }: AppV2Props) {
         {page === "harnesses" && (
           <section aria-label="本机 AI 工具">
             <h1>本机 AI 工具</h1>
+            <p className="app-v2-hint">
+              这里只展示本机已登记的真实工具与它们实际可写的配置类型。完整的分文件本地状态
+              与 Capture 入口属于 INH-1854，尚未接入。
+            </p>
             {harnesses.length === 0 ? (
-              <p>尚未登记本机工具。在设置中登记或检测已安装工具。</p>
+              <p>尚未登记本机工具。在向导中检测已安装工具；未登记的工具不会被自动配置。</p>
             ) : (
-              <ul>
-                {harnesses.map((harness) => (
-                  <li key={harness.harnessInstanceId}>
-                    {harness.displayName}（{harness.adapterId}）— {harness.installed ? "已安装" : "未安装"} ·{" "}
-                    {harness.readiness}
-                  </li>
-                ))}
-              </ul>
+              <table className="app-v2-table">
+                <thead>
+                  <tr>
+                    <th scope="col">工具</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">全局可写类型</th>
+                    <th scope="col">项目可写类型</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {harnesses.map((harness) => (
+                    <tr key={harness.harnessInstanceId}>
+                      <td>
+                        {harness.displayName}（{harness.adapterId}）
+                      </td>
+                      <td>{harness.installed ? `已安装 · ${harness.readiness}` : "未安装"}</td>
+                      <td>{harness.globalKinds.length > 0 ? harness.globalKinds.join("、") : "无"}</td>
+                      <td>{harness.projectKinds.length > 0 ? harness.projectKinds.join("、") : "无"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </section>
         )}
@@ -1246,6 +1267,34 @@ export function AppV2({ api }: AppV2Props) {
                     </li>
                   );
                 })}
+              </ul>
+            )}
+            <h2>待处理批次（Recovery Center）</h2>
+            {recovery === null || recovery.batches.length === 0 ? (
+              <p>没有需要处理的批次。</p>
+            ) : (
+              <ul className="app-v2-list">
+                {recovery.batches.map((batch) => (
+                  <li key={batch.batchId}>
+                    <div>
+                      <strong>{batch.status}</strong> · {batch.updatedAt.slice(0, 19)} ·{" "}
+                      {batch.batchId}
+                      <p className="app-v2-hint">{batch.guidance}</p>
+                      <p className="app-v2-hint">
+                        自动回滚：{batch.rollbackAvailable ? "可用" : "不可用"}
+                        {batch.rollbackReason !== null ? `（${batch.rollbackReason}）` : ""}
+                      </p>
+                      <ul>
+                        {batch.targets.map((target) => (
+                          <li key={target.targetKey}>
+                            {target.targetKey} · {target.state}
+                            {target.detail !== null ? ` — ${target.detail}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </li>
+                ))}
               </ul>
             )}
           </section>

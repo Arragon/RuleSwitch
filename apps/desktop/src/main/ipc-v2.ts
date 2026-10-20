@@ -103,6 +103,7 @@ export function registerV2IpcHandlers(
     },
     "harnesses.list": async () => capabilities.listHarnesses(),
     "history.operations": async () => capabilities.operationHistory(),
+    "history.recovery": async () => capabilities.recoveryStatus(),
     "settings.get": async () => capabilities.getSettings(),
     "settings.setTheme": async (request) => {
       const { theme } = request as { theme: "light" | "dark" | "system" };

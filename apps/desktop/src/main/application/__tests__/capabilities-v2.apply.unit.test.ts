@@ -368,4 +368,48 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     // Nothing was written by the refused apply.
     await expect(readFile(path.join(home, ".codex", "AGENTS.md"))).rejects.toThrow();
   }, 90_000);
+
+  it("records a preflight failure, stops later targets, and surfaces recovery", async () => {
+    const { repo, home, service } = await createService([
+      { harnessInstanceId: "harn_a", adapterId: "codex", displayName: "Codex", installed: true },
+      // Cursor does not support global instructions (capability matrix), so
+      // use OpenCode which does — the point here is failure propagation.
+      { harnessInstanceId: "harn_b", adapterId: "opencode", displayName: "OpenCode", installed: true }
+    ]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const assets = [
+      { assetKey: "asset_agents", kind: "instructions" as const, logicalName: "AGENTS.md", content: new Uint8Array() }
+    ];
+    const targets = [
+      { harnessInstanceId: "harn_a" },
+      { harnessInstanceId: "harn_b" }
+    ];
+
+    const first = await service.applyToHarnesses({ assets, mode: "overwrite", targets });
+    expect(first.appliedCount).toBe(2);
+
+    // Change the source so the remaining target still needs a write, and
+    // drift one target after adoption: its baseline digest no longer matches,
+    // so preflight must refuse instead of overwriting.
+    await writeFile(path.join(repo, "global", "instructions", "AGENTS.md"), "# v2\n", "utf8");
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# drifted\n", "utf8");
+
+    const second = await service.applyToHarnesses({ assets, mode: "overwrite", targets });
+    const byTarget = new Map(second.entries.map((entry) => [entry.harnessInstanceId, entry]));
+    // harn_a sorts first, fails preflight; harn_b must not have started.
+    expect(byTarget.get("harn_a")?.state).toBe("PREFLIGHT_FAILED");
+    expect(byTarget.get("harn_a")?.detail).toMatch(/changed since the recorded baseline/);
+    expect(byTarget.get("harn_b")?.state).toBe("PENDING");
+    expect(second.failedCount).toBe(1);
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# drifted\n");
+
+    // Recovery Center reports the batch with honest rollback availability.
+    const recovery = await service.recoveryStatus();
+    const batch = recovery.batches.find((entry) => entry.batchId === second.batchId);
+    expect(batch).toBeDefined();
+    expect(batch?.rollbackAvailable).toBe(false);
+    expect(batch?.rollbackReason).toMatch(/not persisted/);
+    expect(batch?.targets.some((target) => target.state === "PREFLIGHT_FAILED")).toBe(true);
+  }, 90_000);
 });

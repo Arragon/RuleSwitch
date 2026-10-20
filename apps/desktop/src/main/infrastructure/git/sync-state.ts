@@ -203,6 +203,13 @@ export class OperationsStore extends VersionedSyncStore<OperationsData> {
     return this.current().batchJournals[batchId] ?? null;
   }
 
+  /** Every recorded batch, newest first — used by the recovery surface. */
+  listAllBatches(): readonly BatchJournal[] {
+    return Object.values(this.current().batchJournals).sort((left, right) =>
+      left.updatedAt < right.updatedAt ? 1 : -1
+    );
+  }
+
   listUnsettledBatches(): readonly BatchJournal[] {
     return Object.values(this.current().batchJournals).filter(
       (journal) => journal.status === "RUNNING" || journal.status === "RECOVERY_REQUIRED"

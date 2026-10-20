@@ -72,3 +72,48 @@ confirmAdoption?: boolean
 
 - `hasOwnership` 仍恒为 `false`（尚未接入 INH-1781 的 SyncBaseline store），因此任何已存在目标都会走 `needs-adoption`。这是**安全方向的保守偏差**，不是静默放行；接入基线后应改为按目标查询 ownership。
 - project scope 的 capability 与路径已按矩阵实现，但 UI 尚未提供项目绑定（INH-1855），因此当前仅 global 可在界面选择。
+
+---
+
+## 补记（2026-10-20 第二轮）：preview、validate、project binding、recovery
+
+M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全部向后兼容。
+
+### 6. `ruleswitch:v2:operations:preview-apply`（`apply.preview`）
+
+- 与 apply 共用同一 `planApply()` 计划函数，**不写任何字节**。
+- 返回 `ApplyPreview { planRevision, entries[], applyCount, unchangedCount, blockedCount, needsAdoptionCount }`。
+- `planRevision` 由「资产摘要 + mode + 目标解析结果 + adoption 同意」哈希而成。`apply.toHarnesses` 新增可选 `planRevision`；不匹配时抛 `plan is stale` 并拒绝执行。
+- 意义：INH-1814 要求的 Preview → Confirm 闭环不再靠 UI 自觉，Main 侧强制。
+
+### 7. `ruleswitch:v2:repository:validate`（`repository.validate`）
+
+- 对当前仓库重跑 manifest/asset-graph 解析，返回 `{ok, schemaVersion, assetCount, projectCount, profileCount, diagnostics[]}`。
+- 不写、不改 gate 状态；仅供 onboarding 的「校验仓库清单」步骤给出可解释诊断。
+
+### 8. `ruleswitch:v2:projects:bind` / `projects:unbind`
+
+- `bindProject({projectId, displayName, localPath, rebind?})`：目录存在性、同目录被他人占用、跨目录移动需 `rebind: true`。
+- `remoteVerified` 为三态 `matched | mismatch | unknown`。**永不猜测**：v1 `remoteMatchPatternSchema` 只接受 `git://` / `file://`，https/ssh origin 一律 `unknown` 并附诊断。
+- `ProjectDto` 新增 `remoteVerified`，仍不含任何绝对路径。
+
+### 9. `ruleswitch:v2:history:recovery`（`recoveryStatus`）
+
+- 列出非 `ALL_COMMITTED` 或含 `PREFLIGHT_FAILED`/`APPLY_FAILED`/`VERIFY_FAILED`/`ROLLBACK_FAILED` 的批次，附每目标状态与原因。
+- `rollbackAvailable` 恒为 `false` 且带 `rollbackReason`：本版本**不持久化 apply 前的 snapshot payload**，因此不提供“一键回滚”按钮——这是已知缺口（见计划 R-08），不是 UI 遗漏。
+
+### 10. SyncBaseline store（`sync-baselines`，INH-1781）
+
+- `apps/desktop/src/main/infrastructure/git/baseline-store.ts`，versioned envelope，`sync-baselines` 为冻结 store 名。
+- apply 通过 `digestsFor(repositoryId, harnessInstanceId)` 计算真实 `hasOwnership`；仅在 verify 成功后经 `baselineOutcome` 推进。
+- 效果：重复应用为 `noop`（此前不可达）；用户在本机改动后再次应用被拒为 `UNMANAGED_TARGET_CHANGED`（而非静默覆盖）。
+
+### 11. `apply-plan` 的 `noop` 判定修正
+
+原实现把 `localDigest` 与 `planRevision`（计划级哈希）比较，二者永不相等，`noop` 不可达。现以新增的可选 `sourceDigest`（同编码的源侧聚合摘要）比较，语义为“本地字节已等于将要写入的字节”。
+
+### 影响
+
+- `IPC_V2_METHODS` 21 → 26；`assertV2Surface` 期望值同步。
+- 仍无通用 fs/shell/path 能力；所有新通道使用 opaque ID 或逻辑名，绝对路径只在 Main 内部使用。
+- 新增 store 文件 `v2/sync-baselines-v1.json`；删除后可从 Git 重新 bootstrap。

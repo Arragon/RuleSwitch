@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import type {
   GitAreaReadModel,
+  RecoveryReadModel,
   LibraryReadModel,
   OperationHistoryDto,
   OverviewReadModel,
@@ -37,6 +38,7 @@ export const IPC_V2_METHODS = [
   "projects.unbind",
   "harnesses.list",
   "history.operations",
+  "history.recovery",
   "settings.get",
   "settings.setTheme",
   "apply.preview",
@@ -66,6 +68,7 @@ export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "projects.unbind": "ruleswitch:v2:projects:unbind",
   "harnesses.list": "ruleswitch:v2:harnesses:list",
   "history.operations": "ruleswitch:v2:history:operations",
+  "history.recovery": "ruleswitch:v2:history:recovery",
   "settings.get": "ruleswitch:v2:settings:get",
   "settings.setTheme": "ruleswitch:v2:settings:set-theme",
   "apply.preview": "ruleswitch:v2:operations:preview-apply",
@@ -237,6 +240,7 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   "projects.unbind": z.strictObject({ projectId: z.string().trim().min(1) }),
   "harnesses.list": emptyRequestSchema,
   "history.operations": emptyRequestSchema,
+  "history.recovery": emptyRequestSchema,
   "settings.get": emptyRequestSchema,
   "settings.setTheme": setThemeRequestSchema,
   "apply.preview": applyRequestSchema,
@@ -315,6 +319,8 @@ export interface DesktopApiV2 {
   listProjects(): Promise<readonly ProjectDto[]>;
   listHarnesses(): Promise<readonly HarnessDto[]>;
   operationHistory(): Promise<readonly OperationHistoryDto[]>;
+  /** Batches that need operator attention, with honest rollback availability. */
+  recoveryStatus(): Promise<RecoveryReadModel>;
   getSettings(): Promise<SettingsReadModel>;
   setTheme(theme: "light" | "dark" | "system"): Promise<SettingsReadModel>;
   previewApply(
@@ -352,6 +358,7 @@ export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Obj
   "projects.unbind": "unbindProject",
   "harnesses.list": "listHarnesses",
   "history.operations": "operationHistory",
+  "history.recovery": "recoveryStatus",
   "settings.get": "getSettings",
   "settings.setTheme": "setTheme",
   "apply.preview": "previewApply",
