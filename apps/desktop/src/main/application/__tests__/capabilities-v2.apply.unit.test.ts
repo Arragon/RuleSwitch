@@ -14,6 +14,7 @@ import { CapabilityServiceV2 } from "../../application/capabilities-v2";
 import { GitPortAdapter } from "../../infrastructure/git/git-port-adapter";
 import { createGitRuntime } from "../../infrastructure/git/git-runtime";
 import { ProjectsStore, SettingsStore } from "../../infrastructure/git/binding-store";
+import { SyncBaselineStore } from "../../infrastructure/git/baseline-store";
 import { OperationsStore } from "../../infrastructure/git/sync-state";
 import { RepositoryIdentityStore } from "../../infrastructure/git/identity-store";
 
@@ -75,6 +76,8 @@ async function createService(registrations: readonly HarnessRegistration[] = [])
   await settingsStore.load();
   const operationsStore = new OperationsStore(path.join(root, "state", "operations.json"));
   await operationsStore.load();
+  const baselineStore = new SyncBaselineStore(path.join(root, "state", "baselines.json"));
+  await baselineStore.load();
 
   // A private HOME per test so harness roots never touch the real machine.
   const home = path.join(root, "home");
@@ -86,10 +89,11 @@ async function createService(registrations: readonly HarnessRegistration[] = [])
     projectsStore,
     settingsStore,
     operationsStore,
+    baselineStore,
     harnessRegistry: { listRegistrations: () => registrations },
     hasher
   });
-  return { root, repo, home, service, projectsStore };
+  return { root, repo, home, service, projectsStore, baselineStore };
 }
 
 const codexRegistration: HarnessRegistration = {
@@ -244,5 +248,124 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
 
     expect(outcome.blockedCount).toBe(1);
     expect(outcome.entries[0]?.detail).toMatch(/not installed/);
+  }, 90_000);
+
+  it("records a verified baseline and reports a repeat apply as unchanged", async () => {
+    const { repo, home, service, baselineStore } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const first = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    expect(first.appliedCount).toBe(1);
+
+    // Baseline advanced only after verify: ownership now exists for this
+    // repository + harness instance.
+    const repositoryId = (await service.repositoryStatus())?.repositoryId ?? "";
+    const record = baselineStore.find(repositoryId, "harn_codex", "AGENTS.md");
+    expect(record).not.toBeNull();
+    expect(record?.conversionGrade).toBe("lossless");
+
+    // Second apply must be a no-op, not another "needs adoption" prompt and
+    // not a rewrite. This is the regression that `planRevision` comparison
+    // previously made impossible.
+    const second = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    expect(second.appliedCount).toBe(0);
+    expect(second.unchangedCount).toBe(1);
+    expect(second.blockedCount).toBe(0);
+    expect(second.entries[0]?.action).toBe("noop");
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# global\n");
+  }, 90_000);
+
+  it("treats a user edit after adoption as drift, not as a silent overwrite", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# user changed this\n", "utf8");
+
+    const drift = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+
+    // Baseline digest no longer matches the local file, so the write is
+    // refused with UNMANAGED_TARGET_CHANGED rather than clobbering the edit.
+    expect(drift.appliedCount).toBe(0);
+    expect(drift.failedCount).toBe(1);
+    expect(drift.entries[0]?.detail).toMatch(/changed since the recorded baseline/);
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# user changed this\n");
+  }, 90_000);
+
+  it("previews without writing and reports per-target actions", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# user local\n", "utf8");
+
+    const preview = await service.previewApply({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+
+    expect(preview.entries).toHaveLength(1);
+    expect(preview.entries[0]?.action).toBe("needs-adoption");
+    expect(preview.entries[0]?.requiresConfirmation).toBe(true);
+    expect(preview.needsAdoptionCount).toBe(1);
+    expect(preview.planRevision.length).toBeGreaterThan(0);
+    // Preview is read-only: the user's file is untouched.
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# user local\n");
+  }, 90_000);
+
+  it("refuses an apply whose preview revision no longer matches", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const preview = await service.previewApply({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+
+    // Consent changed after preview, so the plan hash changes: the stale
+    // preview must not be executable.
+    await expect(
+      service.applyToHarnesses({
+        assets: [
+          { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+        ],
+        mode: "overwrite",
+        confirmAdoption: true,
+        targets: [{ harnessInstanceId: "harn_codex" }],
+        planRevision: preview.planRevision
+      })
+    ).rejects.toThrow(/stale/);
+
+    // Nothing was written by the refused apply.
+    await expect(readFile(path.join(home, ".codex", "AGENTS.md"))).rejects.toThrow();
   }, 90_000);
 });

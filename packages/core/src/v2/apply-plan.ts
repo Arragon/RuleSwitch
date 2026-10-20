@@ -26,6 +26,12 @@ export interface ApplyTargetInput {
   readonly requestedMode: ApplyMode;
   /** Fresh digests of the target's current local state (from the scanner). */
   readonly localDigest: string | null;
+  /**
+   * Aggregate digest of the bytes that WOULD be written for this target.
+   * `noop` is decided by comparing this to `localDigest`; without it the
+   * planner cannot prove the target is already in sync and must re-apply.
+   */
+  readonly sourceDigest?: string | null;
   /** True when a trusted baseline/ownership record exists for the target. */
   readonly hasOwnership: boolean;
   /** Adapter capability for this kind on this harness (read-write etc). */
@@ -157,7 +163,15 @@ function buildEntry(
       requiresExplicitConfirmation: true
     };
   }
-  const unchanged = target.localDigest !== null && target.localDigest === planRevision;
+  // Already in sync: the local bytes equal what we would write. This used to
+  // compare against `planRevision` (a plan-wide hash), which could never
+  // match a per-target digest, so `noop` was unreachable and every apply
+  // rewrote an unchanged target.
+  const unchanged =
+    target.localDigest !== null &&
+    target.sourceDigest !== undefined &&
+    target.sourceDigest !== null &&
+    target.localDigest === target.sourceDigest;
   if (unchanged) {
     return { ...base, effectiveMode, action: "noop", blockedReason: null, requiresExplicitConfirmation: false };
   }

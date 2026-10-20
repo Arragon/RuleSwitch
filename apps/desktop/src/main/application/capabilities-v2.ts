@@ -4,7 +4,7 @@
 // read goes through fresh GitPort/scanner reads.
 
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -14,7 +14,10 @@ import type {
   LibraryReadModel,
   OperationHistoryDto,
   OverviewReadModel,
+  ProjectBindRequest,
+  ProjectBindingOutcome,
   ProjectDto,
+  RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
 } from "@ruleswitch/core";
@@ -23,6 +26,7 @@ import {
   buildApplyPlan,
   compareCollections,
   loadRepoInventory,
+  matchesRemote,
   matrixKindsFor,
   matrixRowFor,
   planRepoEdit,
@@ -31,6 +35,8 @@ import {
   type ApplyModeName,
   type ApplyOutcome,
   type ApplyOutcomeEntry,
+  type ApplyPreview,
+  type ApplyPreviewEntry,
   type ApplyPlanEntry,
   type ApplyTargetInput,
   type ApplyTargetSelection,
@@ -38,11 +44,14 @@ import {
   type BatchJournal,
   type HarnessInstanceId,
   type RepositoryId,
-  type StableIdHasher
+  type StableIdHasher,
+  type RemoteMatchPattern,
+  type SyncBaselineRecord
 } from "@ruleswitch/core";
 
 import type { GitPortAdapter } from "../infrastructure/git/git-port-adapter";
 import type { ProjectsStore, SettingsStore } from "../infrastructure/git/binding-store";
+import type { SyncBaselineStore } from "../infrastructure/git/baseline-store";
 import type { OperationsStore } from "../infrastructure/git/sync-state";
 import { applyRenderedTargets } from "../infrastructure/harness/skill-slice";
 
@@ -51,6 +60,11 @@ export interface CapabilityV2Options {
   readonly projectsStore: ProjectsStore;
   readonly settingsStore: SettingsStore;
   readonly operationsStore: OperationsStore;
+  /**
+   * Sync baselines. When present, apply consults real ownership instead of
+   * assuming none — repeat applies become noop rather than needs-adoption.
+   */
+  readonly baselineStore?: SyncBaselineStore;
   readonly harnessRegistry?: {
     listRegistrations(): readonly {
       harnessInstanceId: string;
@@ -315,14 +329,189 @@ export class CapabilityServiceV2 {
 
   async listProjects(): Promise<readonly ProjectDto[]> {
     const bindings = this.options.projectsStore.current().bindings;
-    return Object.values(bindings)
-      .map((binding) => ({
+    const patternsByProject = await this.projectPatterns();
+    return Promise.all(
+      Object.values(bindings).map(async (binding) => ({
         projectId: binding.projectId,
         displayName: binding.displayName,
         localPathPresent: binding.localPath.length > 0,
-        available: binding.available
+        available: binding.available,
+        remoteVerified: await this.verifyProjectRemote(
+          binding.localPath,
+          patternsByProject.get(binding.projectId) ?? []
+        )
       }))
-      .sort((left, right) => (left.projectId < right.projectId ? -1 : 1));
+    ).then((projects) =>
+      [...projects].sort((left, right) => (left.projectId < right.projectId ? -1 : 1))
+    );
+  }
+
+  /** Manifest validation without writes (INH-1809 connect step). */
+  async validateRepository(): Promise<RepositoryValidation | null> {
+    if (this.openRepositoryId === null) {
+      return null;
+    }
+    const { createFsRepoFileSource } = await import("../infrastructure/git/repo-source");
+    const result = await loadRepoInventory(
+      createFsRepoFileSource(this.options.gitPort.currentRoot()),
+      this.options.hasher
+    );
+    if (!result.ok) {
+      return {
+        ok: false,
+        schemaVersion: null,
+        assetCount: 0,
+        projectCount: 0,
+        profileCount: 0,
+        diagnostics: result.diagnostics.map((diagnostic) => ({
+          code: diagnostic.code,
+          logicalPath: diagnostic.logicalPath,
+          message: diagnostic.message
+        }))
+      };
+    }
+    return {
+      ok: true,
+      schemaVersion: result.inventory.manifest.schemaVersion,
+      assetCount: result.inventory.assets.length,
+      projectCount: result.inventory.projects.length,
+      profileCount: result.inventory.profiles.length,
+      diagnostics: []
+    };
+  }
+
+  /**
+   * Binds a project directory. Never fakes a remote match: v1 patterns only
+   * express `git://` / `file://`, so an https origin reports `unknown`.
+   */
+  async bindProject(request: ProjectBindRequest): Promise<ProjectBindingOutcome> {
+    if (this.openRepositoryId === null) {
+      return {
+        ok: false,
+        reason: "no repository is open",
+        remoteVerified: "unknown",
+        diagnostic: null
+      };
+    }
+    const directory = request.localPath.trim();
+    try {
+      const info = await stat(directory);
+      if (!info.isDirectory()) {
+        return {
+          ok: false,
+          reason: "the path is not a directory",
+          remoteVerified: "unknown",
+          diagnostic: null
+        };
+      }
+    } catch {
+      return {
+        ok: false,
+        reason: "the directory is missing or not readable",
+        remoteVerified: "unknown",
+        diagnostic: null
+      };
+    }
+
+    const bindings = Object.values(this.options.projectsStore.current().bindings);
+    const samePath = bindings.find(
+      (binding) => binding.localPath === directory && binding.projectId !== request.projectId
+    );
+    if (samePath !== undefined) {
+      return {
+        ok: false,
+        reason: `the directory is already bound to project ${samePath.projectId}`,
+        remoteVerified: "unknown",
+        diagnostic: null
+      };
+    }
+    const existing = bindings.find((binding) => binding.projectId === request.projectId);
+    if (existing !== undefined && existing.localPath !== directory && request.rebind !== true) {
+      return {
+        ok: false,
+        reason: "the project is already bound to another directory; confirm rebinding first",
+        remoteVerified: "unknown",
+        diagnostic: null
+      };
+    }
+
+    const patterns = (await this.projectPatterns()).get(request.projectId) ?? [];
+    const remoteVerified = await this.verifyProjectRemote(directory, patterns);
+
+    await this.options.projectsStore.bindProject({
+      projectId: request.projectId,
+      repositoryId: this.openRepositoryId,
+      localPath: directory,
+      displayName: request.displayName.trim()
+    });
+
+    return {
+      ok: true,
+      reason: null,
+      remoteVerified,
+      diagnostic:
+        remoteVerified === "unknown"
+          ? "remote identity could not be verified: no matching git:// or file:// pattern for this project"
+          : remoteVerified === "mismatch"
+            ? "the directory's git origin does not match the project's remote patterns"
+            : null
+    };
+  }
+
+  async unbindProject(projectId: string): Promise<boolean> {
+    return this.options.projectsStore.unbind(projectId);
+  }
+
+  /** Remote match patterns declared in the repository manifest, per project. */
+  private async projectPatterns(): Promise<Map<string, readonly RemoteMatchPattern[]>> {
+    const patterns = new Map<string, readonly RemoteMatchPattern[]>();
+    if (this.openRepositoryId === null) {
+      return patterns;
+    }
+    const { createFsRepoFileSource } = await import("../infrastructure/git/repo-source");
+    const result = await loadRepoInventory(
+      createFsRepoFileSource(this.options.gitPort.currentRoot()),
+      this.options.hasher
+    );
+    if (!result.ok) {
+      return patterns;
+    }
+    for (const project of result.inventory.projects) {
+      patterns.set(project.projectId, project.remoteMatch);
+    }
+    return patterns;
+  }
+
+  /**
+   * Reads the directory's origin URL and checks it against the declared
+   * patterns. https/ssh origins are reported `unknown` because v1 patterns
+   * cannot express them — reporting `matched` there would be a guess.
+   */
+  private async verifyProjectRemote(
+    directory: string,
+    patterns: readonly RemoteMatchPattern[]
+  ): Promise<"matched" | "mismatch" | "unknown"> {
+    if (patterns.length === 0) {
+      return "unknown";
+    }
+    let config: string;
+    try {
+      config = await readFile(path.join(directory, ".git", "config"), "utf8");
+    } catch {
+      return "unknown";
+    }
+    const originMatch = /\[remote "origin"\][^[]*?url\s*=\s*(\S+)/.exec(config);
+    const origin = originMatch?.[1] ?? null;
+    if (origin === null) {
+      return "unknown";
+    }
+    const canonical = origin.replace(/\.git$/, "");
+    if (!canonical.startsWith("git://") && !canonical.startsWith("file://")) {
+      return "unknown";
+    }
+    return patterns.some((pattern) => matchesRemote(pattern, canonical))
+      ? "matched"
+      : "mismatch";
   }
 
   async listHarnesses(): Promise<readonly HarnessDto[]> {
@@ -586,32 +775,172 @@ export class CapabilityServiceV2 {
   }
 
   // -------------------------------------------------------------------------
-  // Apply to harness targets (INH-1852 / INH-1814)
+  // -------------------------------------------------------------------------
+  // Apply preview + apply (INH-1852 / INH-1814)
   // -------------------------------------------------------------------------
   //
   // Contract notes:
-  // - Bytes always come from the repository; the Renderer never supplies asset
-  //   content (an empty content field means "load from repo").
+  // - Planning is shared. `previewApply` returns the plan without writing;
+  //   `applyToHarnesses` executes the same planning function. A preview
+  //   revision can be echoed back on apply so a stale plan is rejected
+  //   instead of executed against changed bytes.
+  // - Bytes always come from the repository; the Renderer never supplies
+  //   asset content (an empty content field means "load from repo").
   // - Asset kind is taken from each asset, never hardcoded: one plan entry per
   //   (harness target x asset kind).
-  // - An existing target with no RuleSwitch baseline is `needs-adoption`. It is
-  //   only written when the caller explicitly sets `confirmAdoption`, so a
-  //   first adoption can never silently overwrite a user's local config.
-  // - Targets are resolved from the harness registry and the frozen capability
+  // - Ownership comes from the SyncBaseline store. An existing target with no
+  //   baseline is `needs-adoption` and is only written when the caller
+  //   explicitly sets `confirmAdoption`.
+  // - Targets resolve from the harness registry and the frozen capability
   //   matrix. An unregistered harness is a hard error (never auto-configured);
   //   an unbound project is a blocked entry, not a fake success.
 
-  async applyToHarnesses(input: {
-    readonly assets: readonly {
-      readonly assetKey: string;
-      readonly kind: AssetKind;
-      readonly logicalName: string;
-      readonly content: Uint8Array;
-    }[];
-    readonly mode: ApplyModeName;
-    readonly confirmAdoption?: boolean;
-    readonly targets?: readonly ApplyTargetSelection[];
-  }): Promise<ApplyOutcome> {
+  async previewApply(input: ApplyInput): Promise<ApplyPreview> {
+    const planned = await this.planApply(input);
+    const entries: ApplyPreviewEntry[] = planned.planEntries.map((entry) => {
+      const meta = planned.entryMeta.get(entry.targetKey);
+      return {
+        targetKey: entry.targetKey,
+        harnessInstanceId: meta?.target.harnessInstanceId ?? "",
+        adapterId: meta?.target.adapterId ?? "",
+        displayName: meta?.target.displayName ?? "",
+        scopeKind: meta?.target.scopeKind ?? "global",
+        projectId: meta?.target.projectId ?? null,
+        assetKind: entry.assetKind,
+        mode: entry.effectiveMode,
+        action: entry.action,
+        blockedReason: entry.blockedReason,
+        requiresConfirmation: entry.requiresExplicitConfirmation
+      };
+    });
+    return {
+      planRevision: planned.planRevision,
+      entries,
+      applyCount: entries.filter((entry) => entry.action === "apply").length,
+      unchangedCount: entries.filter((entry) => entry.action === "noop").length,
+      blockedCount: entries.filter((entry) => entry.action === "blocked").length,
+      needsAdoptionCount: entries.filter((entry) => entry.action === "needs-adoption").length
+    };
+  }
+
+  async applyToHarnesses(input: ApplyInput & { readonly planRevision?: string }): Promise<ApplyOutcome> {
+    const planned = await this.planApply(input);
+    if (input.planRevision !== undefined && input.planRevision !== planned.planRevision) {
+      throw new Error(
+        "plan is stale: the repository, targets or adoption consent changed since the preview; re-run preview before applying"
+      );
+    }
+    const confirmAdoption = input.confirmAdoption === true;
+
+    const journal: BatchJournal = {
+      batchId: `batch-${Date.now()}`,
+      planId: planned.planRevision,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "RUNNING",
+      entries: planned.planEntries.map((entry) => {
+        const adoptionPending = entry.action === "needs-adoption" && !confirmAdoption;
+        const runnable =
+          entry.action === "apply" ||
+          (entry.action === "needs-adoption" && confirmAdoption);
+        return {
+          targetKey: entry.targetKey,
+          mode: entry.effectiveMode,
+          planRevision: entry.planRevision,
+          state: runnable ? ("PENDING" as const) : ("SKIPPED_BLOCKED" as const),
+          snapshotRef: null,
+          verifyDigest: null,
+          failureDetail: adoptionPending
+            ? "target exists without a RuleSwitch baseline; adoption must be confirmed"
+            : entry.action === "noop"
+              ? "already in sync with the repository; no write needed"
+              : entry.blockedReason,
+          rollbackOf: false
+        };
+      })
+    };
+
+    const headRevision = await this.headRevision();
+
+    for (const entry of journal.entries) {
+      if (entry.state !== "PENDING") {
+        continue;
+      }
+      const work = planned.executable.find((candidate) => candidate.targetKey === entry.targetKey);
+      if (work === undefined || work.target.scopeRoot === null) {
+        entry.state = "APPLY_FAILED";
+        entry.failureDetail = "harness root not resolvable";
+        continue;
+      }
+      entry.state = "APPLYING";
+      const applied = await applyRenderedTargets({
+        targetRoot: work.target.scopeRoot,
+        targets: work.kindAssets.map((asset) => ({
+          targetLogicalPath: asset.logicalName,
+          content: asset.content
+        })),
+        firstAdoptionConfirmed: confirmAdoption,
+        baselineDigests: work.baselines
+      });
+      if (applied.ok) {
+        entry.state = "COMMITTED";
+        entry.snapshotRef = `snap-${entry.targetKey}`;
+        entry.verifyDigest = work.kindAssets.map((asset) => digestBytes(asset.content)).join(",");
+        await this.advanceBaselines({
+          target: work.target,
+          assets: work.kindAssets,
+          repositoryRevision: headRevision,
+          batchId: journal.batchId
+        });
+      } else {
+        entry.state = "APPLY_FAILED";
+        entry.failureDetail = applied.message;
+        // Frozen batch rule: a failing target stops not-yet-started targets.
+        break;
+      }
+    }
+
+    settleBatch(journal, () => new Date().toISOString());
+    await this.options.operationsStore.saveBatchJournal(journal);
+
+    const actionByTargetKey = new Map(planned.planEntries.map((entry) => [entry.targetKey, entry.action]));
+    const outcomes: ApplyOutcomeEntry[] = journal.entries.map((entry) => {
+      const meta = planned.entryMeta.get(entry.targetKey);
+      return {
+        targetKey: entry.targetKey,
+        harnessInstanceId: meta?.target.harnessInstanceId ?? "",
+        adapterId: meta?.target.adapterId ?? "",
+        displayName: meta?.target.displayName ?? "",
+        scopeKind: meta?.target.scopeKind ?? "global",
+        projectId: meta?.target.projectId ?? null,
+        assetKind: meta?.kind ?? "instructions",
+        mode: entry.mode,
+        action: actionByTargetKey.get(entry.targetKey) ?? "blocked",
+        state: entry.state,
+        detail: entry.failureDetail
+      };
+    });
+
+    return {
+      batchId: journal.batchId,
+      status: journal.status,
+      appliedCount: outcomes.filter((entry) => entry.state === "COMMITTED").length,
+      unchangedCount: outcomes.filter((entry) => entry.action === "noop").length,
+      blockedCount: outcomes.filter(
+        (entry) => entry.state === "SKIPPED_BLOCKED" && entry.action !== "noop"
+      ).length,
+      failedCount: outcomes.filter(
+        (entry) => entry.state === "APPLY_FAILED" || entry.state === "VERIFY_FAILED"
+      ).length,
+      entries: outcomes
+    };
+  }
+
+  /**
+   * The single planning pass behind both preview and apply. Performs no
+   * writes and records no journal — safe to call from a read-only preview.
+   */
+  private async planApply(input: ApplyInput): Promise<PlannedApply> {
     if (input.assets.length === 0) {
       throw new Error("no assets selected");
     }
@@ -646,11 +975,12 @@ export class CapabilityServiceV2 {
     );
 
     const executable: {
-      readonly target: ResolvedApplyTarget;
-      readonly kind: AssetKind;
-      readonly kindAssets: readonly { readonly logicalName: string; readonly content: Uint8Array }[];
-      readonly targetKey: string;
-      readonly mode: ApplyModeName;
+      target: ResolvedApplyTarget;
+      kind: AssetKind;
+      kindAssets: readonly { readonly logicalName: string; readonly content: Uint8Array }[];
+      targetKey: string;
+      mode: ApplyModeName;
+      baselines: Readonly<Record<string, string>>;
     }[] = [];
     const planInputs: ApplyTargetInput[] = [];
     const entryMeta = new Map<string, { readonly target: ResolvedApplyTarget; readonly kind: AssetKind }>();
@@ -663,11 +993,16 @@ export class CapabilityServiceV2 {
           continue;
         }
         const kindRow = matrixKindsFor(target.adapterId).find((row) => row.kind === kind);
-        const capability = kindRow === undefined
-          ? ("unsupported" as const)
-          : target.scopeKind === "global"
-            ? kindRow.global
-            : kindRow.project;
+        const capability =
+          kindRow === undefined
+            ? ("unsupported" as const)
+            : target.scopeKind === "global"
+              ? kindRow.global
+              : kindRow.project;
+        const baselines = this.baselinesFor(target);
+        const hasOwnership =
+          kindAssets.length > 0 &&
+          kindAssets.every((asset) => baselines[asset.logicalName] !== undefined);
         planInputs.push({
           targetKey,
           harnessInstanceId: target.harnessInstanceId as HarnessInstanceId,
@@ -675,15 +1010,13 @@ export class CapabilityServiceV2 {
           assetKind: kind,
           requestedMode: target.mode,
           localDigest: await digestExistingTargets(target, kindAssets),
-          // No baseline store is consulted here yet (INH-1781 baselines are
-          // recorded per project/harness binding), so ownership is reported
-          // honestly as unknown and existing files become needs-adoption.
-          hasOwnership: false,
+          sourceDigest: digestSourceTargets(kindAssets),
+          hasOwnership,
           capability,
           runtimeReady: target.runtimeReady,
           secretReady: true
         });
-        executable.push({ target, kind, kindAssets, targetKey, mode: target.mode });
+        executable.push({ target, kind, kindAssets, targetKey, mode: target.mode, baselines });
       }
     }
 
@@ -696,7 +1029,7 @@ export class CapabilityServiceV2 {
       planEntries.push(...plan.entries);
     }
 
-    // Targets that could not even be resolved still appear in the journal with
+    // Targets that could not even be resolved still appear in the plan with
     // their exact reason, so the UI never shows a silent no-op.
     for (const [targetKey, meta] of entryMeta) {
       if (planEntries.some((entry) => entry.targetKey === targetKey)) {
@@ -717,98 +1050,66 @@ export class CapabilityServiceV2 {
     }
     planEntries.sort((left, right) => (left.targetKey < right.targetKey ? -1 : 1));
 
-    const journal: BatchJournal = {
-      batchId: `batch-${Date.now()}`,
-      planId: planRevision,
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      status: "RUNNING",
-      entries: planEntries.map((entry) => {
-        const adoptionPending =
-          entry.action === "needs-adoption" && !confirmAdoption;
-        const runnable =
-          entry.action === "apply" ||
-          (entry.action === "needs-adoption" && confirmAdoption);
-        return {
-          targetKey: entry.targetKey,
-          mode: entry.effectiveMode,
-          planRevision: entry.planRevision,
-          state: runnable ? ("PENDING" as const) : ("SKIPPED_BLOCKED" as const),
-          snapshotRef: null,
-          verifyDigest: null,
-          failureDetail: adoptionPending
-            ? "target exists without a RuleSwitch baseline; adoption must be confirmed"
-            : entry.blockedReason,
-          rollbackOf: false
-        };
-      })
-    };
+    return { planRevision, planEntries, entryMeta, executable, assets, targets };
+  }
 
-    for (const entry of journal.entries) {
-      if (entry.state !== "PENDING") {
-        continue;
-      }
-      const work = executable.find((candidate) => candidate.targetKey === entry.targetKey);
-      if (work === undefined || work.target.scopeRoot === null) {
-        entry.state = "APPLY_FAILED";
-        entry.failureDetail = "harness root not resolvable";
-        continue;
-      }
-      entry.state = "APPLYING";
-      const applied = await applyRenderedTargets({
-        targetRoot: work.target.scopeRoot,
-        targets: work.kindAssets.map((asset) => ({
-          targetLogicalPath: asset.logicalName,
-          content: asset.content
-        })),
-        firstAdoptionConfirmed: confirmAdoption,
-        baselineDigests: {}
-      });
-      if (applied.ok) {
-        entry.state = "COMMITTED";
-        entry.snapshotRef = `snap-${entry.targetKey}`;
-        entry.verifyDigest = work.kindAssets
-          .map((asset) => digestBytes(asset.content))
-          .join(",");
-      } else {
-        entry.state = "APPLY_FAILED";
-        entry.failureDetail = applied.message;
-        // Frozen batch rule: a failing target stops not-yet-started targets.
-        break;
-      }
+  /** Current HEAD revision of the open repository (empty string when unknown). */
+  private async headRevision(): Promise<string> {
+    if (this.openRepositoryId === null) {
+      return "";
     }
+    const status = await this.options.gitPort.status(this.openRepositoryId);
+    return status.ok && status.value !== null ? status.value.headRevision ?? "" : "";
+  }
 
-    settleBatch(journal, () => new Date().toISOString());
-    await this.options.operationsStore.saveBatchJournal(journal);
+  /** Baseline digests owned by this repository + harness instance for a target. */
+  private baselinesFor(target: ResolvedApplyTarget): Readonly<Record<string, string>> {
+    if (this.options.baselineStore === undefined || this.openRepositoryId === null) {
+      return {};
+    }
+    return this.options.baselineStore.digestsFor(this.openRepositoryId, target.harnessInstanceId);
+  }
 
-    const actionByTargetKey = new Map(planEntries.map((entry) => [entry.targetKey, entry.action]));
-    const outcomes: ApplyOutcomeEntry[] = journal.entries.map((entry) => {
-      const meta = entryMeta.get(entry.targetKey);
-      return {
-        targetKey: entry.targetKey,
-        harnessInstanceId: meta?.target.harnessInstanceId ?? "",
-        adapterId: meta?.target.adapterId ?? "",
-        displayName: meta?.target.displayName ?? "",
-        scopeKind: meta?.target.scopeKind ?? "global",
-        projectId: meta?.target.projectId ?? null,
-        assetKind: meta?.kind ?? "instructions",
-        mode: entry.mode,
-        action: actionByTargetKey.get(entry.targetKey) ?? "blocked",
-        state: entry.state,
-        detail: entry.failureDetail
-      };
-    });
-
-    return {
-      batchId: journal.batchId,
-      status: journal.status,
-      appliedCount: outcomes.filter((entry) => entry.state === "COMMITTED").length,
-      blockedCount: outcomes.filter((entry) => entry.state === "SKIPPED_BLOCKED").length,
-      failedCount: outcomes.filter(
-        (entry) => entry.state === "APPLY_FAILED" || entry.state === "VERIFY_FAILED"
-      ).length,
-      entries: outcomes
-    };
+  /**
+   * Advances the SyncBaseline after a verified commit. This is the only place
+   * apply writes ownership; a failed target never reaches here.
+   */
+  private async advanceBaselines(input: {
+    readonly target: ResolvedApplyTarget;
+    readonly assets: readonly { readonly logicalName: string; readonly content: Uint8Array }[];
+    readonly repositoryRevision: string;
+    readonly batchId: string;
+  }): Promise<void> {
+    const store = this.options.baselineStore;
+    if (store === undefined || this.openRepositoryId === null) {
+      return;
+    }
+    const recordedAt = new Date().toISOString();
+    for (const asset of input.assets) {
+      const digest = digestBytes(asset.content);
+      await store.advance({
+        verified: true,
+        operationComplete: true,
+        record: {
+          repositoryId: this.openRepositoryId as SyncBaselineRecord["repositoryId"],
+          harnessInstanceId: input.target
+            .harnessInstanceId as SyncBaselineRecord["harnessInstanceId"],
+          targetLogicalPath: asset.logicalName,
+          bindingMode: "mirror",
+          repositoryRevision: input.repositoryRevision,
+          sourceAssetKey: asset.logicalName,
+          sourceRevision: digest,
+          converterId: "passthrough",
+          converterVersion: "1",
+          managedKeys: null,
+          outputDigest: digest,
+          outputByteLength: asset.content.byteLength,
+          conversionGrade: "lossless",
+          lastOperationId: input.batchId,
+          recordedAt
+        }
+      });
+    }
   }
 
   /** Repository is the single source of asset bytes. */
@@ -819,7 +1120,14 @@ export class CapabilityServiceV2 {
       readonly logicalName: string;
       readonly content: Uint8Array;
     }[]
-  ): Promise<{ readonly assetKey: string; readonly kind: AssetKind; readonly logicalName: string; readonly content: Uint8Array }[]> {
+  ): Promise<
+    {
+      readonly assetKey: string;
+      readonly kind: AssetKind;
+      readonly logicalName: string;
+      readonly content: Uint8Array;
+    }[]
+  > {
     const { createFsRepoFileSource } = await import("../infrastructure/git/repo-source");
     const inventoryResult = await loadRepoInventory(
       createFsRepoFileSource(this.options.gitPort.currentRoot()),
@@ -973,6 +1281,19 @@ function digestBytes(content: Uint8Array): string {
 }
 
 /**
+ * Aggregate digest of the bytes that would be written. Uses the same encoding
+ * as `digestExistingTargets` so the two are directly comparable for `noop`.
+ */
+function digestSourceTargets(
+  assets: readonly { readonly logicalName: string; readonly content: Uint8Array }[]
+): string {
+  const parts = assets
+    .map((asset) => `${asset.logicalName}:${digestBytes(asset.content)}`)
+    .sort();
+  return createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
+/**
  * Aggregate digest of the target's current local state for one asset kind:
  * null when none of the paths exist (a clean create), otherwise a hash over
  * present/absent markers so any local edit changes the digest.
@@ -1000,4 +1321,39 @@ async function digestExistingTargets(
     return null;
   }
   return createHash("sha256").update(parts.sort().join("\n")).digest("hex");
+}
+
+/** Main-side apply request: asset bytes are already decoded. */
+export interface ApplyInput {
+  readonly assets: readonly {
+    readonly assetKey: string;
+    readonly kind: AssetKind;
+    readonly logicalName: string;
+    readonly content: Uint8Array;
+  }[];
+  readonly mode: ApplyModeName;
+  readonly confirmAdoption?: boolean;
+  readonly targets?: readonly ApplyTargetSelection[];
+}
+
+/** Result of the shared planning pass (no writes, no journal). */
+interface PlannedApply {
+  readonly planRevision: string;
+  readonly planEntries: readonly ApplyPlanEntry[];
+  readonly entryMeta: Map<string, { readonly target: ResolvedApplyTarget; readonly kind: AssetKind }>;
+  readonly executable: readonly {
+    readonly target: ResolvedApplyTarget;
+    readonly kind: AssetKind;
+    readonly kindAssets: readonly { readonly logicalName: string; readonly content: Uint8Array }[];
+    readonly targetKey: string;
+    readonly mode: ApplyModeName;
+    readonly baselines: Readonly<Record<string, string>>;
+  }[];
+  readonly assets: readonly {
+    readonly assetKey: string;
+    readonly kind: AssetKind;
+    readonly logicalName: string;
+    readonly content: Uint8Array;
+  }[];
+  readonly targets: readonly ResolvedApplyTarget[];
 }

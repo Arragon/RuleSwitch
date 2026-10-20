@@ -1125,3 +1125,10 @@ h2 {
   border-color: color-mix(in srgb, var(--v2-danger) 60%, var(--v2-border));
   color: var(--v2-danger);
 }
+
+.app-v2 button.primary {
+  border-color: color-mix(in srgb, var(--v2-accent) 65%, var(--v2-border));
+  background: color-mix(in srgb, var(--v2-accent) 14%, var(--v2-surface));
+  color: var(--v2-accent);
+  font-weight: 600;
+}

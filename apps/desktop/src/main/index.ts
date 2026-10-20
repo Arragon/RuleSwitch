@@ -8,6 +8,7 @@ import { RulesyncProvider } from "@ruleswitch/rulesync-provider";
 import { CapabilityServiceV2 } from "./application/capabilities-v2";
 import { RuleSwitchApplication } from "./application/rule-switch-application";
 import { HarnessRegistryStore, ProjectsStore, SettingsStore } from "./infrastructure/git/binding-store";
+import { SyncBaselineStore } from "./infrastructure/git/baseline-store";
 import { RepositoryIdentityStore } from "./infrastructure/git/identity-store";
 import { createGitRuntime } from "./infrastructure/git/git-runtime";
 import { GitPortAdapter } from "./infrastructure/git/git-port-adapter";
@@ -43,11 +44,14 @@ async function createMainWindow(): Promise<void> {
   await operationsStore.load();
   const harnessRegistry = new HarnessRegistryStore(path.join(appDataRoot, "v2", "harness-registry-v1.json"));
   await harnessRegistry.load();
+  const baselineStore = new SyncBaselineStore(path.join(appDataRoot, "v2", "sync-baselines-v1.json"));
+  await baselineStore.load();
   const capabilities = new CapabilityServiceV2({
     gitPort,
     projectsStore,
     settingsStore,
     operationsStore,
+    baselineStore,
     harnessRegistry,
     hasher: {
       sha256Hex(input) {

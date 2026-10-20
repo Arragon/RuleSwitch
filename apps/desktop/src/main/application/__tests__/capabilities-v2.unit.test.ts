@@ -70,6 +70,9 @@ describe("CapabilityServiceV2 (M7)", () => {
     const methods: Record<string, unknown> = {
       openRepositoryFromDirectory: () => undefined,
       repositoryStatus: () => undefined,
+      validateRepository: () => undefined,
+      bindProject: () => undefined,
+      unbindProject: () => undefined,
       browseLibrary: () => undefined,
       readRepoFile: () => undefined,
       editRepoFile: () => undefined,
@@ -88,10 +91,11 @@ describe("CapabilityServiceV2 (M7)", () => {
       operationHistory: () => undefined,
       getSettings: () => undefined,
       setTheme: () => undefined,
+      previewApply: () => undefined,
       applyToHarnesses: () => undefined
     };
     expect(assertV2Surface(methods as never)).toEqual([]);
-    expect(assertV2Surface({} as never).length).toBe(21);
+    expect(assertV2Surface({} as never).length).toBe(25);
   });
 
   it("opens a repository and shapes the library read model with draft markers", async () => {

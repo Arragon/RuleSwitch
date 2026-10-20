@@ -18,6 +18,7 @@ import type {
 export const IPC_V2_METHODS = [
   "repository.openFromDirectory",
   "repository.status",
+  "repository.validate",
   "library.browse",
   "library.readFile",
   "library.editFile",
@@ -32,10 +33,13 @@ export const IPC_V2_METHODS = [
   "changes.fastForward",
   "changes.log",
   "projects.list",
+  "projects.bind",
+  "projects.unbind",
   "harnesses.list",
   "history.operations",
   "settings.get",
   "settings.setTheme",
+  "apply.preview",
   "apply.toHarnesses"
 ] as const;
 export type IpcV2Method = (typeof IPC_V2_METHODS)[number];
@@ -43,6 +47,7 @@ export type IpcV2Method = (typeof IPC_V2_METHODS)[number];
 export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "repository.openFromDirectory": "ruleswitch:v2:repository:open-from-directory",
   "repository.status": "ruleswitch:v2:repository:status",
+  "repository.validate": "ruleswitch:v2:repository:validate",
   "library.browse": "ruleswitch:v2:assets:library",
   "library.readFile": "ruleswitch:v2:assets:read-file",
   "library.editFile": "ruleswitch:v2:assets:edit-file",
@@ -57,10 +62,13 @@ export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "changes.fastForward": "ruleswitch:v2:changes:fast-forward",
   "changes.log": "ruleswitch:v2:changes:log",
   "projects.list": "ruleswitch:v2:projects:list",
+  "projects.bind": "ruleswitch:v2:projects:bind",
+  "projects.unbind": "ruleswitch:v2:projects:unbind",
   "harnesses.list": "ruleswitch:v2:harnesses:list",
   "history.operations": "ruleswitch:v2:history:operations",
   "settings.get": "ruleswitch:v2:settings:get",
   "settings.setTheme": "ruleswitch:v2:settings:set-theme",
+  "apply.preview": "ruleswitch:v2:operations:preview-apply",
   "apply.toHarnesses": "ruleswitch:v2:operations:apply-to-harnesses"
 });
 
@@ -126,6 +134,8 @@ export interface ApplyOutcome {
   readonly batchId: string;
   readonly status: string;
   readonly appliedCount: number;
+  /** Targets already byte-identical to the repository (no write performed). */
+  readonly unchangedCount: number;
   readonly blockedCount: number;
   readonly failedCount: number;
   readonly entries: readonly ApplyOutcomeEntry[];
@@ -136,10 +146,65 @@ const applyScopeSchema = z.union([
   z.strictObject({ kind: z.literal("project"), projectId: z.string().trim().min(1) })
 ]);
 
+/** One planned apply target, surfaced before any write (INH-1814 preview). */
+export interface ApplyPreviewEntry {
+  readonly targetKey: string;
+  readonly harnessInstanceId: string;
+  readonly adapterId: string;
+  readonly displayName: string;
+  readonly scopeKind: "global" | "project";
+  readonly projectId: string | null;
+  readonly assetKind: string;
+  readonly mode: ApplyModeName;
+  /** apply | noop | needs-adoption | skip-add-only-exists | blocked */
+  readonly action: string;
+  readonly blockedReason: string | null;
+  readonly requiresConfirmation: boolean;
+}
+
+/**
+ * Read-only plan. `planRevision` is echoed back on apply; a mismatch means
+ * the repository, targets or consent changed since preview and the apply is
+ * refused (stale plan guard).
+ */
+export interface ApplyPreview {
+  readonly planRevision: string;
+  readonly entries: readonly ApplyPreviewEntry[];
+  readonly applyCount: number;
+  readonly unchangedCount: number;
+  readonly blockedCount: number;
+  readonly needsAdoptionCount: number;
+}
+
+const applyAssetRequestSchema = z.array(
+  z.strictObject({
+    assetKey: z.string().min(1),
+    kind: z.string().min(1),
+    logicalName: z.string().min(1),
+    contentBase64: z.string().min(1)
+  })
+).min(1);
+
+const applyTargetRequestSchema = z.array(
+  z.strictObject({
+    harnessInstanceId: z.string().trim().min(1),
+    mode: z.enum(APPLY_MODE_NAMES).optional(),
+    scope: applyScopeSchema.optional()
+  })
+).min(1);
+
+const applyRequestSchema = z.strictObject({
+  assets: applyAssetRequestSchema,
+  mode: z.enum(APPLY_MODE_NAMES),
+  confirmAdoption: z.boolean().optional(),
+  targets: applyTargetRequestSchema.optional()
+});
+
 /** Per-method request schemas (Renderer→Main). Responses are Main DTOs. */
 export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.freeze({
   "repository.openFromDirectory": z.strictObject({ directory: z.string().trim().min(1) }),
   "repository.status": emptyRequestSchema,
+  "repository.validate": emptyRequestSchema,
   "library.browse": emptyRequestSchema,
   "library.readFile": z.strictObject({ logicalPath: z.string().trim().min(1) }),
   "library.editFile": z.strictObject({
@@ -163,40 +228,72 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
     pageSize: z.number().int().min(1).max(100)
   }),
   "projects.list": emptyRequestSchema,
+  "projects.bind": z.strictObject({
+    projectId: z.string().trim().min(1),
+    displayName: z.string().trim().min(1).max(200),
+    localPath: z.string().trim().min(1),
+    rebind: z.boolean().optional()
+  }),
+  "projects.unbind": z.strictObject({ projectId: z.string().trim().min(1) }),
   "harnesses.list": emptyRequestSchema,
   "history.operations": emptyRequestSchema,
   "settings.get": emptyRequestSchema,
   "settings.setTheme": setThemeRequestSchema,
-  "apply.toHarnesses": z.strictObject({
-    assets: z
-      .array(
-        z.strictObject({
-          assetKey: z.string().min(1),
-          kind: z.string().min(1),
-          logicalName: z.string().min(1),
-          contentBase64: z.string().min(1)
-        })
-      )
-      .min(1),
-    mode: z.enum(APPLY_MODE_NAMES),
-    confirmAdoption: z.boolean().optional(),
-    targets: z
-      .array(
-        z.strictObject({
-          harnessInstanceId: z.string().trim().min(1),
-          mode: z.enum(APPLY_MODE_NAMES).optional(),
-          scope: applyScopeSchema.optional()
-        })
-      )
-      .min(1)
-      .optional()
+  "apply.preview": applyRequestSchema,
+  "apply.toHarnesses": applyRequestSchema.extend({
+    planRevision: z.string().min(1).optional()
   })
 });
+
+export interface RepositoryValidationDiagnostic {
+  readonly code: string;
+  readonly logicalPath: string | null;
+  readonly message: string;
+}
+
+/** Structured result of a manifest/asset-graph validation pass. */
+export interface RepositoryValidation {
+  readonly ok: boolean;
+  readonly schemaVersion: number | null;
+  readonly assetCount: number;
+  readonly projectCount: number;
+  readonly profileCount: number;
+  readonly diagnostics: readonly RepositoryValidationDiagnostic[];
+}
+
+export interface ProjectBindRequest {
+  readonly projectId: string;
+  readonly displayName: string;
+  /** Absolute local directory. Accepted only on the Main side. */
+  readonly localPath: string;
+  /** Required to move an already-bound project to a new directory. */
+  readonly rebind?: boolean;
+}
+
+/**
+ * `remoteVerified` is deliberately tri-state: v1 remote patterns only accept
+ * `git://` / `file://` forms, so an https origin cannot be proven and must
+ * not be reported as matched.
+ */
+export interface ProjectBindingOutcome {
+  readonly ok: boolean;
+  readonly reason: string | null;
+  readonly remoteVerified: "matched" | "mismatch" | "unknown";
+  readonly diagnostic: string | null;
+}
 
 /** The v2 Renderer API surface (exposed via contextBridge as ruleswitchV2). */
 export interface DesktopApiV2 {
   openRepositoryFromDirectory(directory: string): Promise<OverviewReadModel | null>;
   repositoryStatus(): Promise<OverviewReadModel | null>;
+  /**
+   * Re-validates the open repository's manifest and asset graph without
+   * writing. Diagnostics are structured so the UI can show an actionable
+   * next step instead of a bare failure.
+   */
+  validateRepository(): Promise<RepositoryValidation | null>;
+  bindProject(request: ProjectBindRequest): Promise<ProjectBindingOutcome>;
+  unbindProject(projectId: string): Promise<boolean>;
   browseLibrary(): Promise<LibraryReadModel | null>;
   /**
    * Reads one repository asset for the editor. Request/response use the
@@ -220,10 +317,15 @@ export interface DesktopApiV2 {
   operationHistory(): Promise<readonly OperationHistoryDto[]>;
   getSettings(): Promise<SettingsReadModel>;
   setTheme(theme: "light" | "dark" | "system"): Promise<SettingsReadModel>;
-  applyToHarnesses(
+  previewApply(
     assets: readonly ApplyAssetInput[],
     mode: ApplyModeName,
     options?: ApplyOptions
+  ): Promise<ApplyPreview>;
+  applyToHarnesses(
+    assets: readonly ApplyAssetInput[],
+    mode: ApplyModeName,
+    options?: ApplyOptions & { readonly planRevision?: string }
   ): Promise<ApplyOutcome>;
 }
 
@@ -231,6 +333,7 @@ export interface DesktopApiV2 {
 export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Object.freeze({
   "repository.openFromDirectory": "openRepositoryFromDirectory",
   "repository.status": "repositoryStatus",
+  "repository.validate": "validateRepository",
   "library.browse": "browseLibrary",
   "library.readFile": "readRepoFile",
   "library.editFile": "editRepoFile",
@@ -245,10 +348,13 @@ export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Obj
   "changes.fastForward": "fastForward",
   "changes.log": "logPage",
   "projects.list": "listProjects",
+  "projects.bind": "bindProject",
+  "projects.unbind": "unbindProject",
   "harnesses.list": "listHarnesses",
   "history.operations": "operationHistory",
   "settings.get": "getSettings",
   "settings.setTheme": "setTheme",
+  "apply.preview": "previewApply",
   "apply.toHarnesses": "applyToHarnesses"
 });
 

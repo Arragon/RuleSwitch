@@ -98,6 +98,23 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["repository.status"], {})) as Awaited<
       ReturnType<DesktopApiV2["repositoryStatus"]>
     >,
+  validateRepository: async () =>
+    unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["repository.validate"], {})) as Awaited<
+      ReturnType<DesktopApiV2["validateRepository"]>
+    >,
+  bindProject: async (request: {
+    projectId: string;
+    displayName: string;
+    localPath: string;
+    rebind?: boolean;
+  }) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["projects.bind"], request)
+    ) as Awaited<ReturnType<DesktopApiV2["bindProject"]>>,
+  unbindProject: async (projectId: string) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["projects.unbind"], { projectId })
+    ) as boolean,
   browseLibrary: async () =>
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["library.browse"], {})) as Awaited<
       ReturnType<DesktopApiV2["browseLibrary"]>
@@ -164,7 +181,7 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["settings.setTheme"], { theme })) as Awaited<
       ReturnType<DesktopApiV2["setTheme"]>
     >,
-  applyToHarnesses: async (
+  previewApply: async (
     assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[],
     mode: "overwrite" | "merge-add" | "add-only",
     options?: {
@@ -177,11 +194,33 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     }
   ) =>
     unwrap(
-      await ipcRenderer.invoke(IPC_V2_CHANNELS["apply.toHarnesses"], {
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["apply.preview"], {
         assets,
         mode,
         ...(options?.confirmAdoption === undefined ? {} : { confirmAdoption: options.confirmAdoption }),
         ...(options?.targets === undefined ? {} : { targets: options.targets })
+      })
+    ) as Awaited<ReturnType<DesktopApiV2["previewApply"]>>,
+  applyToHarnesses: async (
+    assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[],
+    mode: "overwrite" | "merge-add" | "add-only",
+    options?: {
+      readonly confirmAdoption?: boolean;
+      readonly targets?: readonly {
+        readonly harnessInstanceId: string;
+        readonly mode?: "overwrite" | "merge-add" | "add-only";
+        readonly scope?: { readonly kind: "global" } | { readonly kind: "project"; readonly projectId: string };
+      }[];
+      readonly planRevision?: string;
+    }
+  ) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["apply.toHarnesses"], {
+        assets,
+        mode,
+        ...(options?.confirmAdoption === undefined ? {} : { confirmAdoption: options.confirmAdoption }),
+        ...(options?.targets === undefined ? {} : { targets: options.targets }),
+        ...(options?.planRevision === undefined ? {} : { planRevision: options.planRevision })
       })
     ) as Awaited<ReturnType<DesktopApiV2["applyToHarnesses"]>>
 });

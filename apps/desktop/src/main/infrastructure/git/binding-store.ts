@@ -155,6 +155,18 @@ export class ProjectsStore extends VersionedStore<ProjectsStoreData> {
     });
   }
 
+  /** Removes a local binding. Config content in Git is untouched. */
+  async unbind(projectId: string): Promise<boolean> {
+    const existing = this.current().bindings[projectId];
+    if (existing === undefined) {
+      return false;
+    }
+    await this.mutate((data) => {
+      delete data.bindings[projectId];
+    });
+    return true;
+  }
+
   async rebindPath(projectId: string, localPath: string): Promise<void> {
     await this.mutate((data) => {
       const existing = data.bindings[projectId];

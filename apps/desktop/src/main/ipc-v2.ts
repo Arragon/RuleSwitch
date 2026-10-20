@@ -17,6 +17,25 @@ import type { CapabilityServiceV2 } from "./application/capabilities-v2";
 
 type Handler = (request: unknown) => Promise<unknown>;
 
+interface ApplyAssetPayload {
+  readonly assetKey: string;
+  readonly kind: string;
+  readonly logicalName: string;
+  readonly contentBase64: string;
+}
+
+/** Decodes asset bytes once for both preview and apply. */
+function decodeApplyAssets(
+  assets: readonly ApplyAssetPayload[]
+): { assetKey: string; kind: AssetKind; logicalName: string; content: Uint8Array }[] {
+  return assets.map((asset) => ({
+    assetKey: asset.assetKey,
+    kind: asset.kind as AssetKind,
+    logicalName: asset.logicalName,
+    content: new Uint8Array(Buffer.from(asset.contentBase64, "base64"))
+  }));
+}
+
 export function registerV2IpcHandlers(
   ipcMain: IpcMain,
   mainWindowContents: WebContents,
@@ -28,6 +47,7 @@ export function registerV2IpcHandlers(
       return capabilities.openRepositoryFromDirectory(directory);
     },
     "repository.status": async () => capabilities.repositoryStatus(),
+    "repository.validate": async () => capabilities.validateRepository(),
     "library.browse": async () => capabilities.browseLibrary(),
     "library.readFile": async (request) => {
       const { logicalPath } = request as { logicalPath: string };
@@ -63,6 +83,24 @@ export function registerV2IpcHandlers(
       return capabilities.logPage(cursor, pageSize);
     },
     "projects.list": async () => capabilities.listProjects(),
+    "projects.bind": async (request) => {
+      const { projectId, displayName, localPath, rebind } = request as {
+        projectId: string;
+        displayName: string;
+        localPath: string;
+        rebind?: boolean;
+      };
+      return capabilities.bindProject({
+        projectId,
+        displayName,
+        localPath,
+        ...(rebind === undefined ? {} : { rebind })
+      });
+    },
+    "projects.unbind": async (request) => {
+      const { projectId } = request as { projectId: string };
+      return capabilities.unbindProject(projectId);
+    },
     "harnesses.list": async () => capabilities.listHarnesses(),
     "history.operations": async () => capabilities.operationHistory(),
     "settings.get": async () => capabilities.getSettings(),
@@ -70,7 +108,7 @@ export function registerV2IpcHandlers(
       const { theme } = request as { theme: "light" | "dark" | "system" };
       return capabilities.setTheme(theme);
     },
-    "apply.toHarnesses": async (request) => {
+    "apply.preview": async (request) => {
       const { assets, mode, confirmAdoption, targets } = request as {
         assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[];
         mode: "overwrite" | "merge-add" | "add-only";
@@ -81,16 +119,31 @@ export function registerV2IpcHandlers(
           scope?: { kind: "global" } | { kind: "project"; projectId: string };
         }[];
       };
-      const decoded = assets.map((asset) => ({
-        ...asset,
-        kind: asset.kind as AssetKind,
-        content: new Uint8Array(Buffer.from(asset.contentBase64, "base64"))
-      }));
-      return capabilities.applyToHarnesses({
-        assets: decoded,
+      return capabilities.previewApply({
+        assets: decodeApplyAssets(assets),
         mode,
         ...(confirmAdoption === undefined ? {} : { confirmAdoption }),
         ...(targets === undefined ? {} : { targets })
+      });
+    },
+    "apply.toHarnesses": async (request) => {
+      const { assets, mode, confirmAdoption, targets, planRevision } = request as {
+        assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[];
+        mode: "overwrite" | "merge-add" | "add-only";
+        confirmAdoption?: boolean;
+        targets?: readonly {
+          harnessInstanceId: string;
+          mode?: "overwrite" | "merge-add" | "add-only";
+          scope?: { kind: "global" } | { kind: "project"; projectId: string };
+        }[];
+        planRevision?: string;
+      };
+      return capabilities.applyToHarnesses({
+        assets: decodeApplyAssets(assets),
+        mode,
+        ...(confirmAdoption === undefined ? {} : { confirmAdoption }),
+        ...(targets === undefined ? {} : { targets }),
+        ...(planRevision === undefined ? {} : { planRevision })
       });
     }
   };

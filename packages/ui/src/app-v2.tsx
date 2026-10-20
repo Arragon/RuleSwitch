@@ -6,6 +6,7 @@
 import type {
   ApplyModeName,
   ApplyOutcome,
+  ApplyPreview,
   DesktopApiV2,
   GitAreaReadModel,
   LibraryReadModel,
@@ -13,6 +14,7 @@ import type {
   ProjectDto,
   HarnessDto,
   OperationHistoryDto,
+  RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
 } from "@ruleswitch/core";import { NAV_PAGES, type NavPage } from "./app-v2-model";
@@ -57,10 +59,41 @@ function decodeBase64(base64: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+/** Assets eligible for apply: native files are versioned, never projected. */
+function applyAssetsOf(library: LibraryReadModel): {
+  assetKey: string;
+  kind: string;
+  logicalName: string;
+  contentBase64: string;
+}[] {
+  return library.entries
+    .filter((entry) => entry.kind !== "native")
+    .map((entry) => ({
+      assetKey: entry.assetKey,
+      kind: entry.kind,
+      logicalName: entry.logicalName,
+      contentBase64: ""
+    }));
+}
+
 const APPLY_MODE_LABELS: Record<ApplyModeName, string> = {
   overwrite: "覆盖",
   "merge-add": "合并/新增",
   "add-only": "仅新增"
+};
+
+const REMOTE_VERIFIED_LABELS: Record<string, string> = {
+  matched: "已匹配",
+  mismatch: "不匹配",
+  unknown: "未验证"
+};
+
+const PREVIEW_ACTION_LABELS: Record<string, string> = {
+  apply: "将写入",
+  noop: "已同步",
+  "needs-adoption": "需接管确认",
+  "skip-add-only-exists": "仅新增：已存在跳过",
+  blocked: "被阻止"
 };
 
 const APPLY_STATE_LABELS: Record<string, string> = {
@@ -93,10 +126,17 @@ export function AppV2({ api }: AppV2Props) {
   >({});
   const [confirmAdoption, setConfirmAdoption] = useState(false);
   const [applyOutcome, setApplyOutcome] = useState<ApplyOutcome | null>(null);
+  const [applyPreview, setApplyPreview] = useState<ApplyPreview | null>(null);
   const [editor, setEditor] = useState<{ readonly logicalPath: string; readonly content: string } | null>(
     null
   );
   const [dialog, setDialog] = useState<DialogRequest | null>(null);
+  const [repositoryValidation, setRepositoryValidation] = useState<RepositoryValidation | null>(null);
+  const [projectForm, setProjectForm] = useState({
+    projectId: "",
+    displayName: "",
+    localPath: ""
+  });
   const [onboarding, dispatchOnboarding] = useReducer(
     (state: ReturnType<typeof initialOnboardingState>, action: OnboardingAction) =>
       reduceOnboarding(state, action),
@@ -212,6 +252,27 @@ export function AppV2({ api }: AppV2Props) {
       setGitArea(await api.gitArea());
     });
 
+  const previewSelected = (): Promise<void> =>
+    safeRun(async () => {
+      const current = library ?? (await api.browseLibrary());
+      if (current === null) {
+        setError("未连接配置库");
+        return;
+      }
+      if (selectedApplyTargets.length === 0) {
+        setError("请至少选择一个目标工具");
+        return;
+      }
+      setApplyOutcome(null);
+      setApplyPreview(
+        await api.previewApply(applyAssetsOf(current), applyMode, {
+          confirmAdoption,
+          targets: selectedApplyTargets
+        })
+      );
+      setMessage("预览已生成；确认后才会写入");
+    });
+
   const applySelected = (adoption: boolean): Promise<void> =>
     safeRun(async () => {
       const current = library ?? (await api.browseLibrary());
@@ -219,14 +280,7 @@ export function AppV2({ api }: AppV2Props) {
         setError("未连接配置库");
         return;
       }
-      const assets = current.entries
-        .filter((entry) => entry.kind !== "native")
-        .map((entry) => ({
-          assetKey: entry.assetKey,
-          kind: entry.kind,
-          logicalName: entry.logicalName,
-          contentBase64: ""
-        }));
+      const assets = applyAssetsOf(current);
       if (assets.length === 0) {
         setError("配置库没有可应用的资产");
         return;
@@ -235,16 +289,131 @@ export function AppV2({ api }: AppV2Props) {
         setError("请至少选择一个目标工具");
         return;
       }
-      const outcome = await api.applyToHarnesses(assets, applyMode, {
-        confirmAdoption: adoption,
-        targets: selectedApplyTargets
-      });
+      if (applyPreview === null) {
+        setError("请先生成预览再确认应用");
+        return;
+      }
+      let outcome: ApplyOutcome;
+      try {
+        outcome = await api.applyToHarnesses(assets, applyMode, {
+          confirmAdoption: adoption,
+          targets: selectedApplyTargets,
+          planRevision: applyPreview.planRevision
+        });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "";
+        if (message.includes("stale")) {
+          // The plan no longer matches reality: force a fresh preview so the
+          // user cannot confirm a plan built from old bytes.
+          setApplyPreview(null);
+          setError("预览已过期（仓库或目标已变化），请重新预览后确认");
+          return;
+        }
+        throw cause;
+      }
+      setApplyPreview(null);
       setApplyOutcome(outcome);
       setMessage(
-        `批量应用 ${outcome.status}：已应用 ${outcome.appliedCount} / 未执行 ${outcome.blockedCount} / 失败 ${outcome.failedCount}`
+        `批量应用 ${outcome.status}：已应用 ${outcome.appliedCount} / 已同步 ${outcome.unchangedCount} / 未执行 ${outcome.blockedCount} / 失败 ${outcome.failedCount}`
       );
       setOverview(await api.repositoryStatus());
       setOperations(await api.operationHistory());
+    });
+
+  const validateCurrentRepository = (): Promise<void> =>
+    safeRun(async () => {
+      const validation = await api.validateRepository();
+      setRepositoryValidation(validation);
+      if (validation === null) {
+        setError("未连接配置库");
+            return;
+      }
+      setMessage(validation.ok ? "清单校验通过" : "清单存在问题，见下方诊断");
+    });
+
+  const beginDetect = (): Promise<void> =>
+    safeRun(async () => {
+      const status = await api.repositoryStatus();
+      if (status === null) {
+        dispatchOnboarding({ type: "connect-failed", message: "请先连接配置库" });
+        return;
+      }
+      dispatchOnboarding({ type: "connected", overview: status });
+      const detected = await api.listHarnesses();
+      setHarnesses(detected);
+      dispatchOnboarding({
+        type: "harnesses-detected",
+        harnesses: detected.map((harness) => ({
+          harnessInstanceId: harness.harnessInstanceId,
+          displayName: harness.displayName,
+          installed: harness.installed
+        }))
+      });
+    });
+
+  const confirmHarnesses = (): Promise<void> =>
+    safeRun(async () => {
+      if (onboarding.selectedHarnessIds.length === 0) {
+        dispatchOnboarding({ type: "error", message: "至少选择一个已安装工具" });
+        return;
+      }
+      const bound = await api.listProjects();
+      setProjects(bound);
+      dispatchOnboarding({ type: "projects-loaded", projects: bound });
+    });
+
+  const runFirstPreview = (): Promise<void> =>
+    safeRun(async () => {
+      const current = library ?? (await api.browseLibrary());
+      if (current === null) {
+        dispatchOnboarding({ type: "error", message: "配置库尚未就绪，请先连接并校验" });
+        return;
+      }
+      const preview = await api.previewApply(applyAssetsOf(current), applyMode, {
+        targets: onboarding.selectedHarnessIds.map((harnessInstanceId) => ({ harnessInstanceId }))
+      });
+      dispatchOnboarding({
+        type: "previewed",
+        preview: {
+          planRevision: preview.planRevision,
+          applyCount: preview.applyCount,
+          unchangedCount: preview.unchangedCount,
+          needsAdoptionCount: preview.needsAdoptionCount,
+          blockedCount: preview.blockedCount
+        }
+      });
+    });
+
+  const bindProject = (rebind: boolean): Promise<void> =>
+    safeRun(async () => {
+      const outcome = await api.bindProject({
+        projectId: projectForm.projectId.trim(),
+        displayName: projectForm.displayName.trim(),
+        localPath: projectForm.localPath.trim(),
+        ...(rebind ? { rebind: true } : {})
+      });
+      if (!outcome.ok) {
+        setError(outcome.reason ?? "绑定失败");
+        return;
+      }
+      setProjects(await api.listProjects());
+      setProjectForm({ projectId: "", displayName: "", localPath: "" });
+      setMessage(
+        outcome.diagnostic !== null
+          ? `项目已绑定（${REMOTE_VERIFIED_LABELS[outcome.remoteVerified]}）：${outcome.diagnostic}`
+          : `项目已绑定（${REMOTE_VERIFIED_LABELS[outcome.remoteVerified]}）`
+      );
+    });
+
+  const unbindProject = (projectId: string): Promise<void> =>
+    safeRun(async () => {
+      const ok = await api.unbindProject(projectId);
+      if (!ok) {
+        setError("解除绑定失败（项目未绑定）");
+        return;
+      }
+      setProjects(await api.listProjects());
+      setMessage(`已解除绑定 ${projectId}（配置库内容未改动）`);
     });
 
   const libraryGroups = useMemo(() => groupLibraryEntries(library?.entries ?? []), [library]);
@@ -297,86 +466,172 @@ export function AppV2({ api }: AppV2Props) {
         {onboardingOpen && (
           <section aria-label="Onboarding" className="onboarding">
             <h2>配置新工具 / 新设备</h2>
-            <p>
-              步骤 {onboarding.step} · 当前设备与 Git 来源可见（revision {onboarding.overview?.repositoryId?.slice(0, 7) ?? "—"}）
+            <p className="app-v2-hint">
+              步骤 {onboarding.step} · Git 来源分支{" "}
+              {onboarding.overview?.branch ?? "—"} · 工作树{" "}
+              {onboarding.overview?.workingTree ?? "—"}
             </p>
             {onboarding.error !== null && (
               <p role="alert" className="onboarding-error">
                 {onboarding.error}
               </p>
             )}
+
             {onboarding.step === "connect" && (
-              <button
-                type="button"
-                onClick={() =>
-                  void safeRun(async () => {
-                    const result = await api.repositoryStatus();
-                    if (result === null) {
-                      dispatchOnboarding({ type: "connect-failed", message: "请先在 Overview 连接配置库" });
-                      return;
-                    }
-                    dispatchOnboarding({ type: "connected", overview: result });
-                  })
-                }
-              >
-                下一步：检测本机工具
-              </button>
+              <div>
+                <div className="app-v2-actions">
+                  <button type="button" onClick={() => void connectRepository()}>
+                    连接配置库（Git 仓库）
+                  </button>
+                  <button type="button" onClick={() => void validateCurrentRepository()}>
+                    校验仓库清单
+                  </button>
+                  <button type="button" onClick={() => void beginDetect()}>
+                    下一步：检测本机工具
+                  </button>
+                </div>
+                {repositoryValidation !== null && (
+                  <div className="app-v2-outcome" role="status" aria-label="仓库校验">
+                    {repositoryValidation.ok ? (
+                      <p>
+                        清单有效：schema v{repositoryValidation.schemaVersion ?? "?"} ·{" "}
+                        {repositoryValidation.assetCount} 个资产 ·{" "}
+                        {repositoryValidation.projectCount} 个项目定义 ·{" "}
+                        {repositoryValidation.profileCount} 个 profile
+                      </p>
+                    ) : (
+                      <>
+                        <p>清单不可用，需要先修复以下问题：</p>
+                        <ul>
+                          {repositoryValidation.diagnostics.map((diagnostic, index) => (
+                            <li key={`${diagnostic.code}-${index}`}>
+                              {diagnostic.code}
+                              {diagnostic.logicalPath !== null ? ` · ${diagnostic.logicalPath}` : ""} —{" "}
+                              {diagnostic.message}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
+
             {onboarding.step === "detect" && (
               <div>
                 <p>
-                  已安装工具 {onboarding.selectedHarnessIds.length}/{onboarding.detectedHarnesses.length}（未安装工具请先安装/检测）
+                  已安装工具 {onboarding.selectedHarnessIds.length}/
+                  {onboarding.detectedHarnesses.length}（未安装工具请先安装/检测；未登记工具不会被自动配置）
                 </p>
-                <button type="button" onClick={() => dispatchOnboarding({ type: "select-all-harnesses" })}>
-                  全选
-                </button>
-                <button type="button" onClick={() => dispatchOnboarding({ type: "deselect-all-harnesses" })}>
-                  反选
-                </button>
-                <ul>
+                <div className="app-v2-actions">
+                  <button type="button" onClick={() => dispatchOnboarding({ type: "select-all-harnesses" })}>
+                    全选
+                  </button>
+                  <button type="button" onClick={() => dispatchOnboarding({ type: "deselect-all-harnesses" })}>
+                    全不选
+                  </button>
+                </div>
+                <ul className="app-v2-list">
                   {onboarding.detectedHarnesses.map((harness) => (
                     <li key={harness.harnessInstanceId}>
-                      <label>
+                      <label className="app-v2-inline">
                         <input
                           type="checkbox"
                           checked={onboarding.selectedHarnessIds.includes(harness.harnessInstanceId)}
-                          onChange={() => dispatchOnboarding({ type: "toggle-harness", harnessInstanceId: harness.harnessInstanceId })}
+                          onChange={() =>
+                            dispatchOnboarding({
+                              type: "toggle-harness",
+                              harnessInstanceId: harness.harnessInstanceId
+                            })
+                          }
                         />
                         {harness.displayName}（{harness.installed ? "已安装" : "未安装——先安装/检测"}）
                       </label>
                     </li>
                   ))}
                 </ul>
-                <button type="button" disabled={!canProceedFromDetect(onboarding)} onClick={() => void refresh("harnesses")}>
-                  下一步：绑定项目
-                </button>
+                <div className="app-v2-actions">
+                  <button
+                    type="button"
+                    disabled={!canProceedFromDetect(onboarding)}
+                    onClick={() => void confirmHarnesses()}
+                  >
+                    下一步：绑定项目
+                  </button>
+                </div>
               </div>
             )}
+
             {onboarding.step === "bind" && (
               <div>
-                <p>全局与多个项目选择：项目绑定需通过 Git remote 身份验证。</p>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void safeRun(async () => {
-                      setProjects(await api.listProjects());
-                      dispatchOnboarding({ type: "projects-loaded", projects: await api.listProjects() });
-                    })
-                  }
-                >
-                  下一步：总预览
-                </button>
+                <p>
+                  项目绑定需要本地目录与远端身份校验。当前已绑定 {onboarding.projects.length} 个项目；
+                  全局 scope 不依赖项目绑定即可继续。
+                </p>
+                <ul className="app-v2-list">
+                  {onboarding.projects.length === 0 ? (
+                    <li>尚未绑定项目。</li>
+                  ) : (
+                    onboarding.projects.map((project) => (
+                      <li key={project.projectId}>
+                        <span className="app-v2-asset">
+                          {project.displayName}（{project.projectId}）
+                        </span>
+                        {project.available ? "可用" : "不可用"}
+                      </li>
+                    ))
+                  )}
+                </ul>
+                <div className="app-v2-actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPage("projects");
+                      setOnboardingOpen(false);
+                      void refresh("projects");
+                    }}
+                  >
+                    前往项目页绑定
+                  </button>
+                  <button type="button" onClick={() => void runFirstPreview()}>
+                    下一步：总预览
+                  </button>
+                </div>
               </div>
             )}
+
             {onboarding.step === "preview" && (
               <div>
-                {onboarding.adoptionRequired && (
-                  <p role="alert">检测到已有目标文件——首次接管需要 Adoption/Ownership 确认，不会直接覆盖。</p>
+                {onboarding.preview !== null && (
+                  <div className="app-v2-outcome" role="status" aria-label="首个总预览">
+                    <p>
+                      将写入 {onboarding.preview.applyCount} / 已同步{" "}
+                      {onboarding.preview.unchangedCount} / 需接管{" "}
+                      {onboarding.preview.needsAdoptionCount} / 被阻止{" "}
+                      {onboarding.preview.blockedCount}
+                    </p>
+                  </div>
                 )}
-                <p>成功后不会自动 Push；重复执行不会重置你的本地内容。</p>
-                <button type="button" onClick={() => dispatchOnboarding({ type: "reset" })}>
-                  完成
-                </button>
+                {onboarding.adoptionRequired && (
+                  <p role="alert">
+                    检测到已有目标文件——首次接管需要 Adoption/Ownership 确认，不会直接覆盖。
+                  </p>
+                )}
+                <p className="app-v2-hint">
+                  成功后不会自动 Push；重复执行不会重置你的本地内容。正式写入请到“配置库”页预览后确认。
+                </p>
+                <div className="app-v2-actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      dispatchOnboarding({ type: "reset" });
+                      setOnboardingOpen(false);
+                    }}
+                  >
+                    完成
+                  </button>
+                </div>
               </div>
             )}
           </section>
@@ -631,17 +886,50 @@ export function AppV2({ api }: AppV2Props) {
                   <button
                     type="button"
                     disabled={selectedApplyTargets.length === 0 || busy}
+                    onClick={() => void previewSelected()}
+                  >
+                    预览变更（{selectedApplyTargets.length} 个目标）
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={applyPreview === null || busy}
                     onClick={() => void applySelected(confirmAdoption)}
                   >
-                    应用到所选工具（{selectedApplyTargets.length}）
+                    确认应用
                   </button>
                 </div>
+
+                {applyPreview !== null && (
+                  <div className="app-v2-outcome" role="group" aria-label="变更预览">
+                    <p>
+                      预览 · 将写入 {applyPreview.applyCount} / 已同步{" "}
+                      {applyPreview.unchangedCount} / 需接管 {applyPreview.needsAdoptionCount} /
+                      被阻止 {applyPreview.blockedCount}
+                    </p>
+                    <ul>
+                      {applyPreview.entries.map((entry) => (
+                        <li key={entry.targetKey}>
+                          {entry.displayName} · {entry.assetKind} ·{" "}
+                          {APPLY_MODE_LABELS[entry.mode] ?? entry.mode} ·{" "}
+                          {PREVIEW_ACTION_LABELS[entry.action] ?? entry.action}
+                          {entry.blockedReason !== null ? ` — ${entry.blockedReason}` : ""}
+                          {entry.requiresConfirmation ? "（需确认）" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="app-v2-hint">
+                      确认会按此计划写入；若仓库、目标或接管选择在预览后发生变化，写入会被拒绝并要求重新预览。
+                    </p>
+                  </div>
+                )}
 
                 {applyOutcome !== null && (
                   <div className="app-v2-outcome" role="status" aria-label="应用结果">
                     <p>
-                      {applyOutcome.status} · 已应用 {applyOutcome.appliedCount} / 未执行{" "}
-                      {applyOutcome.blockedCount} / 失败 {applyOutcome.failedCount}
+                      {applyOutcome.status} · 已应用 {applyOutcome.appliedCount} / 已同步{" "}
+                      {applyOutcome.unchangedCount} / 未执行 {applyOutcome.blockedCount} / 失败{" "}
+                      {applyOutcome.failedCount}
                     </p>
                     <ul>
                       {applyOutcome.entries.map((entry) => (
@@ -687,17 +975,100 @@ export function AppV2({ api }: AppV2Props) {
         {page === "projects" && (
           <section aria-label="项目">
             <h1>项目</h1>
+            <p className="app-v2-hint">
+              项目本地设置与全局继承分别标记。绑定会校验目录可用性；远端身份只在能证明时报告为“匹配”，
+              无法证明时明确显示“未验证”，不会静默应用。
+            </p>
+            <div className="app-v2-actions">
+              <input
+                type="text"
+                aria-label="项目 ID"
+                placeholder="项目 ID（如 prj_demo）"
+                value={projectForm.projectId}
+                onChange={(event) =>
+                  setProjectForm({ ...projectForm, projectId: event.target.value })
+                }
+              />
+              <input
+                type="text"
+                aria-label="项目名称"
+                placeholder="项目名称"
+                value={projectForm.displayName}
+                onChange={(event) =>
+                  setProjectForm({ ...projectForm, displayName: event.target.value })
+                }
+              />
+              <input
+                type="text"
+                aria-label="项目目录"
+                placeholder="本地项目目录绝对路径"
+                value={projectForm.localPath}
+                onChange={(event) =>
+                  setProjectForm({ ...projectForm, localPath: event.target.value })
+                }
+              />
+              <button
+                type="button"
+                disabled={
+                  projectForm.projectId.trim().length === 0 ||
+                  projectForm.displayName.trim().length === 0 ||
+                  projectForm.localPath.trim().length === 0 ||
+                  busy
+                }
+                onClick={() => void bindProject(false)}
+              >
+                绑定
+              </button>
+            </div>
+
             {projects.length === 0 ? (
-              <p>尚未绑定项目。</p>
+              <p>尚未绑定项目。绑定后可在应用目标中选择该项目作用域。</p>
             ) : (
-              <ul>
-                {projects.map((project) => (
-                  <li key={project.projectId}>
-                    {project.displayName}（{project.projectId}）—{" "}
-                    {project.available ? "可用" : "不可用（路径移动或缺失）"}
-                  </li>
-                ))}
-              </ul>
+              <table className="app-v2-table">
+                <thead>
+                  <tr>
+                    <th scope="col">项目</th>
+                    <th scope="col">目录</th>
+                    <th scope="col">远端身份</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projects.map((project) => (
+                    <tr key={project.projectId}>
+                      <td>
+                        {project.displayName}（{project.projectId}）
+                      </td>
+                      <td>{project.localPathPresent ? "已绑定目录" : "未绑定"}</td>
+                      <td>{REMOTE_VERIFIED_LABELS[project.remoteVerified] ?? project.remoteVerified}</td>
+                      <td>{project.available ? "可用" : "不可用（路径移动或缺失）"}</td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProjectForm({
+                              projectId: project.projectId,
+                              displayName: project.displayName,
+                              localPath: ""
+                            });
+                            setMessage("填入新目录后点击“绑定”将请求重新绑定确认");
+                          }}
+                        >
+                          重新绑定
+                        </button>{" "}
+                        <button
+                          type="button"
+                          className="danger"
+                          onClick={() => void unbindProject(project.projectId)}
+                        >
+                          解除绑定
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </section>
         )}

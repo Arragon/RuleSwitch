@@ -76,6 +76,12 @@ export interface ProjectDto {
   readonly displayName: string;
   readonly localPathPresent: boolean;
   readonly available: boolean;
+  /**
+   * Whether the bound directory's git origin matches the project's remote
+   * patterns. `unknown` when the project declares no pattern or the origin is
+   * an https/ssh URL that v1 patterns cannot express.
+   */
+  readonly remoteVerified: "matched" | "mismatch" | "unknown";
 }
 
 export interface HarnessDto {

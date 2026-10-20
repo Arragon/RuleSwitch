@@ -13,6 +13,15 @@ export const ONBOARDING_STEPS = [
 ] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
+/** First-preview summary produced by `previewApply` (read-only). */
+export interface OnboardingPreview {
+  readonly planRevision: string;
+  readonly applyCount: number;
+  readonly unchangedCount: number;
+  readonly needsAdoptionCount: number;
+  readonly blockedCount: number;
+}
+
 export interface OnboardingState {
   readonly step: OnboardingStep;
   readonly overview: OverviewReadModel | null;
@@ -21,6 +30,7 @@ export interface OnboardingState {
   readonly projects: readonly ProjectDto[];
   readonly error: string | null;
   readonly adoptionRequired: boolean;
+  readonly preview: OnboardingPreview | null;
 }
 
 export type OnboardingAction =
@@ -31,6 +41,7 @@ export type OnboardingAction =
   | { readonly type: "select-all-harnesses" }
   | { readonly type: "deselect-all-harnesses" }
   | { readonly type: "projects-loaded"; readonly projects: readonly ProjectDto[] }
+  | { readonly type: "previewed"; readonly preview: OnboardingPreview }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "adoption-required" }
   | { readonly type: "reset" };
@@ -43,7 +54,8 @@ export function initialOnboardingState(): OnboardingState {
     selectedHarnessIds: [],
     projects: [],
     error: null,
-    adoptionRequired: false
+    adoptionRequired: false,
+    preview: null
   };
 }
 
@@ -74,6 +86,14 @@ export function reduceOnboarding(state: OnboardingState, action: OnboardingActio
       return { ...state, step: "bind", projects: action.projects };
     case "error":
       return { ...state, error: action.message };
+    case "previewed":
+      return {
+        ...state,
+        step: "preview",
+        preview: action.preview,
+        adoptionRequired: action.preview.needsAdoptionCount > 0,
+        error: null
+      };
     case "adoption-required":
       return { ...state, adoptionRequired: true, step: "preview" };
     case "reset":
