@@ -218,9 +218,12 @@ export function AppV2({ api }: AppV2Props) {
         title: "连接配置库",
         message: "输入本地 Git 仓库根目录路径。RuleSwitch 只会读取该仓库，不会自动推送。",
         confirmLabel: "连接",
-        input: { label: "仓库路径", placeholder: "/Users/you/config-repo", initialValue: "" },
-        onConfirm: async (directory) => {
+        fields: [
+          { name: "directory", label: "仓库路径", placeholder: "/Users/you/config-repo", initialValue: "" }
+        ],
+        onConfirm: async (values) => {
           setDialog(null);
+          const directory = values[0] ?? "";
           await safeRun(async () => {
             const result = await api.openRepositoryFromDirectory(directory.trim());
             if (result === null) {
@@ -228,6 +231,52 @@ export function AppV2({ api }: AppV2Props) {
               return;
             }
             setOverview(result);
+            setPage("overview");
+          });
+          resolve();
+        }
+      });
+    });
+
+  const cloneRepository = (): Promise<void> =>
+    new Promise((resolve) => {
+      setDialog({
+        title: "克隆配置库",
+        message:
+          "从远端克隆一个新的配置库并打开。目标目录必须不存在；克隆成功不会自动推送，凭据由系统 Git 处理。",
+        confirmLabel: "克隆并打开",
+        fields: [
+          {
+            name: "remoteUrl",
+            label: "远端地址",
+            placeholder: "git@github.com:you/config.git",
+            initialValue: ""
+          },
+          {
+            name: "targetDirectory",
+            label: "目标目录",
+            placeholder: "/Users/you/RuleSwitch/config-repo",
+            initialValue: ""
+          }
+        ],
+        onConfirm: async (values) => {
+          setDialog(null);
+          const remoteUrl = (values[0] ?? "").trim();
+          const targetDirectory = (values[1] ?? "").trim();
+          await safeRun(async () => {
+            const outcome = await api.cloneRepository(remoteUrl, targetDirectory);
+            if (!outcome.ok) {
+              setError(outcome.reason ?? "克隆失败（检查凭据、地址与目录权限）");
+              return;
+            }
+            if (!outcome.manifestPresent) {
+              setError("克隆成功但仓库根目录没有 ruleswitch.yaml，无法作为配置库使用");
+            }
+            const status = await api.repositoryStatus();
+            if (status !== null) {
+              setOverview(status);
+            }
+            setMessage("克隆完成并已打开配置库");
             setPage("overview");
           });
           resolve();
@@ -484,7 +533,10 @@ export function AppV2({ api }: AppV2Props) {
               <div>
                 <div className="app-v2-actions">
                   <button type="button" onClick={() => void connectRepository()}>
-                    连接配置库（Git 仓库）
+                    连接已有配置库
+                  </button>
+                  <button type="button" onClick={() => void cloneRepository()}>
+                    克隆配置库
                   </button>
                   <button type="button" onClick={() => void validateCurrentRepository()}>
                     校验仓库清单

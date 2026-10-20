@@ -197,4 +197,39 @@ describe("CapabilityServiceV2 project binding (INH-1855)", () => {
     // Config content is untouched by a local unbind.
     expect((await service.browseLibrary())?.entries).toHaveLength(1);
   }, 90_000);
+
+  it("refuses to clone into an existing directory", async () => {
+    const { root, service } = await createService();
+    const existing = path.join(root, "already-there");
+    await mkdir(existing, { recursive: true });
+
+    const outcome = await service.cloneRepository("file:///tmp/nowhere.git", existing);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.reason).toMatch(/already exists/);
+  }, 90_000);
+
+  it("reports a clone failure instead of opening a half-built repository", async () => {
+    const { root, service } = await createService();
+    const target = path.join(root, "clone-target");
+
+    const outcome = await service.cloneRepository(
+      `file://${path.join(root, "missing-remote.git")}`,
+      target
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.reason).not.toBeNull();
+    // Nothing was opened, so repository status stays null.
+    expect(await service.repositoryStatus()).toBeNull();
+  }, 90_000);
+
+  it("clones a real repository and opens it with the manifest detected", async () => {
+    const { root, repo, service } = await createService();
+    const target = path.join(root, "cloned-config");
+
+    const outcome = await service.cloneRepository(`file://${repo}`, target);
+    expect(outcome.ok).toBe(true);
+    expect(outcome.manifestPresent).toBe(true);
+    const status = await service.repositoryStatus();
+    expect(status?.repositoryBound).toBe(true);
+  }, 90_000);
 });

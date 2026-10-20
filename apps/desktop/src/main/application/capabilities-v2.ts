@@ -18,6 +18,7 @@ import type {
   ProjectBindingOutcome,
   ProjectDto,
   RecoveryReadModel,
+  RepositoryCloneOutcome,
   RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
@@ -105,6 +106,48 @@ export class CapabilityServiceV2 {
     }
     this.openRepositoryId = opened.value.repositoryId;
     return this.overviewFrom(opened.value);
+  }
+
+  /**
+   * Clones a config repo and opens it. Refuses an existing target directory:
+   * cloning into a non-empty tree would merge unrelated content.
+   */
+  async cloneRepository(
+    remoteUrl: string,
+    targetDirectory: string
+  ): Promise<RepositoryCloneOutcome> {
+    const directory = targetDirectory.trim();
+    if (directory.length === 0 || remoteUrl.trim().length === 0) {
+      return { ok: false, reason: "remote URL and target directory are required", manifestPresent: false };
+    }
+    try {
+      await stat(directory);
+      return {
+        ok: false,
+        reason: "the target directory already exists; choose a new directory or open it instead",
+        manifestPresent: false
+      };
+    } catch {
+      // Absent target directory is the expected case.
+    }
+    const cloned = await this.options.gitPort.clone({
+      remoteUrl: remoteUrl.trim(),
+      targetDirectory: directory
+    });
+    if (!cloned.ok || cloned.value === null) {
+      return {
+        ok: false,
+        reason: cloned.error?.message ?? "clone failed",
+        manifestPresent: false
+      };
+    }
+    this.openRepositoryId = cloned.value.repositoryId;
+    const described = await this.options.gitPort.describeRepository(cloned.value.repositoryId);
+    return {
+      ok: true,
+      reason: null,
+      manifestPresent: described.ok && described.value !== null ? described.value.manifestPresent : false
+    };
   }
 
   async repositoryStatus(): Promise<OverviewReadModel | null> {

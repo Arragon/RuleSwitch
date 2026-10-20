@@ -18,6 +18,7 @@ import type {
 
 export const IPC_V2_METHODS = [
   "repository.openFromDirectory",
+  "repository.clone",
   "repository.status",
   "repository.validate",
   "library.browse",
@@ -48,6 +49,7 @@ export type IpcV2Method = (typeof IPC_V2_METHODS)[number];
 
 export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "repository.openFromDirectory": "ruleswitch:v2:repository:open-from-directory",
+  "repository.clone": "ruleswitch:v2:repository:clone",
   "repository.status": "ruleswitch:v2:repository:status",
   "repository.validate": "ruleswitch:v2:repository:validate",
   "library.browse": "ruleswitch:v2:assets:library",
@@ -206,6 +208,10 @@ const applyRequestSchema = z.strictObject({
 /** Per-method request schemas (Renderer→Main). Responses are Main DTOs. */
 export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.freeze({
   "repository.openFromDirectory": z.strictObject({ directory: z.string().trim().min(1) }),
+  "repository.clone": z.strictObject({
+    remoteUrl: z.string().trim().min(1),
+    targetDirectory: z.string().trim().min(1)
+  }),
   "repository.status": emptyRequestSchema,
   "repository.validate": emptyRequestSchema,
   "library.browse": emptyRequestSchema,
@@ -249,6 +255,13 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   })
 });
 
+export interface RepositoryCloneOutcome {
+  readonly ok: boolean;
+  readonly reason: string | null;
+  /** Whether the cloned tree actually contains a ruleswitch.yaml at HEAD. */
+  readonly manifestPresent: boolean;
+}
+
 export interface RepositoryValidationDiagnostic {
   readonly code: string;
   readonly logicalPath: string | null;
@@ -289,6 +302,11 @@ export interface ProjectBindingOutcome {
 /** The v2 Renderer API surface (exposed via contextBridge as ruleswitchV2). */
 export interface DesktopApiV2 {
   openRepositoryFromDirectory(directory: string): Promise<OverviewReadModel | null>;
+  /**
+   * Clones a config repository and opens it. The target directory must not
+   * exist yet; Main refuses instead of merging into an existing tree.
+   */
+  cloneRepository(remoteUrl: string, targetDirectory: string): Promise<RepositoryCloneOutcome>;
   repositoryStatus(): Promise<OverviewReadModel | null>;
   /**
    * Re-validates the open repository's manifest and asset graph without
@@ -338,6 +356,7 @@ export interface DesktopApiV2 {
 /** Frozen mapping: v2 method name → DesktopApiV2 key. */
 export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Object.freeze({
   "repository.openFromDirectory": "openRepositoryFromDirectory",
+  "repository.clone": "cloneRepository",
   "repository.status": "repositoryStatus",
   "repository.validate": "validateRepository",
   "library.browse": "browseLibrary",

@@ -1,13 +1,15 @@
 // In-app confirmation surface.
 //
 // Replaces `window.prompt` / `window.confirm`: a browser-native dialog is not
-// themeable, cannot express risk semantics (delete / first adoption /
-// degraded conversion), and blocks the renderer. This component is the single
-// confirmation surface for every risky operation in the v2 shell.
+// themeable, cannot express risk semantics (delete / first adoption / clone
+// destination), and blocks the renderer. This component is the single
+// confirmation surface for every risky or input-gathering operation in the
+// v2 shell.
 
 import { useEffect, useId, useRef, useState } from "react";
 
 export interface DialogInput {
+  readonly name: string;
   readonly label: string;
   readonly placeholder: string;
   readonly initialValue: string;
@@ -19,8 +21,9 @@ export interface DialogRequest {
   readonly confirmLabel: string;
   /** `danger` marks irreversible or overwrite-style operations. */
   readonly tone?: "default" | "danger";
-  readonly input?: DialogInput;
-  readonly onConfirm: (inputValue: string) => Promise<void> | void;
+  /** Ordered inputs; the confirm handler receives values in the same order. */
+  readonly fields?: readonly DialogInput[];
+  readonly onConfirm: (values: readonly string[]) => Promise<void> | void;
 }
 
 export interface ConfirmDialogProps {
@@ -30,14 +33,17 @@ export interface ConfirmDialogProps {
 
 export function ConfirmDialog({ request, onCancel }: ConfirmDialogProps) {
   const titleId = useId();
-  const [value, setValue] = useState(request.input?.initialValue ?? "");
+  const fields = request.fields ?? [];
+  const [values, setValues] = useState<string[]>(() =>
+    fields.map((field) => field.initialValue)
+  );
   const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const firstInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    (request.input ? inputRef.current : confirmRef.current)?.focus();
-  }, [request.input]);
+    (fields.length > 0 ? firstInputRef.current : confirmRef.current)?.focus();
+  }, [fields.length]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -49,8 +55,7 @@ export function ConfirmDialog({ request, onCancel }: ConfirmDialogProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onCancel]);
 
-  const confirmDisabled =
-    busy || (request.input !== undefined && value.trim().length === 0);
+  const confirmDisabled = busy || values.some((value) => value.trim().length === 0);
 
   return (
     <div className="app-v2-dialog-backdrop">
@@ -63,18 +68,23 @@ export function ConfirmDialog({ request, onCancel }: ConfirmDialogProps) {
       >
         <h2 id={titleId}>{request.title}</h2>
         <p>{request.message}</p>
-        {request.input !== undefined && (
-          <label className="app-v2-dialog-field">
-            <span>{request.input.label}</span>
+        {fields.map((field, index) => (
+          <label key={field.name} className="app-v2-dialog-field">
+            <span>{field.label}</span>
             <input
-              ref={inputRef}
+              ref={index === 0 ? firstInputRef : undefined}
               type="text"
-              value={value}
-              placeholder={request.input.placeholder}
-              onChange={(event) => setValue(event.target.value)}
+              value={values[index] ?? ""}
+              placeholder={field.placeholder}
+              aria-label={field.label}
+              onChange={(event) => {
+                const next = [...values];
+                next[index] = event.target.value;
+                setValues(next);
+              }}
             />
           </label>
-        )}
+        ))}
         <div className="app-v2-dialog-actions">
           <button type="button" onClick={onCancel} disabled={busy}>
             取消
@@ -86,7 +96,7 @@ export function ConfirmDialog({ request, onCancel }: ConfirmDialogProps) {
             disabled={confirmDisabled}
             onClick={() => {
               setBusy(true);
-              void Promise.resolve(request.onConfirm(value)).finally(() => setBusy(false));
+              void Promise.resolve(request.onConfirm(values)).finally(() => setBusy(false));
             }}
           >
             {request.confirmLabel}

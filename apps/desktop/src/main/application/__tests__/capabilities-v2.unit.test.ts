@@ -69,6 +69,7 @@ describe("CapabilityServiceV2 (M7)", () => {
   it("exposes exactly the frozen v2 surface", () => {
     const methods: Record<string, unknown> = {
       openRepositoryFromDirectory: () => undefined,
+      cloneRepository: () => undefined,
       repositoryStatus: () => undefined,
       validateRepository: () => undefined,
       bindProject: () => undefined,
@@ -96,7 +97,7 @@ describe("CapabilityServiceV2 (M7)", () => {
       applyToHarnesses: () => undefined
     };
     expect(assertV2Surface(methods as never)).toEqual([]);
-    expect(assertV2Surface({} as never).length).toBe(26);
+    expect(assertV2Surface({} as never).length).toBe(27);
   });
 
   it("opens a repository and shapes the library read model with draft markers", async () => {

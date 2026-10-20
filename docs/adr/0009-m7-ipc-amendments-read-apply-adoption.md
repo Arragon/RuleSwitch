@@ -114,6 +114,7 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 
 ### 影响
 
-- `IPC_V2_METHODS` 21 → 26；`assertV2Surface` 期望值同步。
+- `IPC_V2_METHODS` 21 → 27（新增 `repository.clone`）；`assertV2Surface` 期望值同步。
+- `repository.clone({remoteUrl, targetDirectory})`：目标目录必须不存在，克隆后校验 `ruleswitch.yaml` 是否存在（`manifestPresent`）；凭据完全交给系统 Git，应用不接触凭据。
 - 仍无通用 fs/shell/path 能力；所有新通道使用 opaque ID 或逻辑名，绝对路径只在 Main 内部使用。
 - 新增 store 文件 `v2/sync-baselines-v1.json`；删除后可从 Git 重新 bootstrap。

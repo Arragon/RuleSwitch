@@ -46,6 +46,13 @@ export function registerV2IpcHandlers(
       const directory = (request as { directory: string }).directory;
       return capabilities.openRepositoryFromDirectory(directory);
     },
+    "repository.clone": async (request) => {
+      const { remoteUrl, targetDirectory } = request as {
+        remoteUrl: string;
+        targetDirectory: string;
+      };
+      return capabilities.cloneRepository(remoteUrl, targetDirectory);
+    },
     "repository.status": async () => capabilities.repositoryStatus(),
     "repository.validate": async () => capabilities.validateRepository(),
     "library.browse": async () => capabilities.browseLibrary(),

@@ -98,6 +98,10 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["repository.status"], {})) as Awaited<
       ReturnType<DesktopApiV2["repositoryStatus"]>
     >,
+  cloneRepository: async (remoteUrl: string, targetDirectory: string) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["repository.clone"], { remoteUrl, targetDirectory })
+    ) as Awaited<ReturnType<DesktopApiV2["cloneRepository"]>>,
   validateRepository: async () =>
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["repository.validate"], {})) as Awaited<
       ReturnType<DesktopApiV2["validateRepository"]>
