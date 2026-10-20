@@ -1,0 +1,4 @@
+projectId: prj_web
+displayName: Web 前端
+gitRemotes:
+  - git://github.com/acme/web

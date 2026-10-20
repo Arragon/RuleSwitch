@@ -1,8 +1,12 @@
 # Architecture Overview
 
-## Implemented Phase A
+## Implemented Baseline
 
-Phase A walking skeleton 已实现：真实 Electron Main/Preload/Renderer、RulesyncProvider、React UI、capability filesystem、filesystem-first transaction stores 与 Playwright E2E 可串起 Open → Raw/Rendered → Open External → Stage → Generated/Diff → Apply/Verify → History → Restore。当前是安全最小纵切，不是完整 v0.1。
+**v1.0 主线（M0–M6）** 已在 macOS 验证：`packages/core/src/v2/` 提供身份、reconcile、apply-plan、batch-apply、GitPort、Harness adapter、stores 与 IPC v2 契约；`apps/desktop/src/main/infrastructure/{git,harness}` 提供真实实现；`CapabilityServiceV2` 是唯一 v2 读写入口（21 通道）。
+
+**M7** 提供七页产品 shell（`packages/ui/src/app-v2.tsx`），只消费 Main 产出的 read model。
+
+**Phase A** walking skeleton 仍在兼容窗口内：真实 Electron Main/Preload/Renderer、RulesyncProvider、React UI、capability filesystem、filesystem-first transaction stores 与 Playwright E2E 串起 Open → Raw/Rendered → Open External → Stage → Generated/Diff → Apply/Verify → History → Restore。其 transaction / snapshot / ownership / path 语义是 v1 复用的安全基线。
 
 ## Four Layers and Dependency Direction
 
@@ -36,6 +40,22 @@ flowchart TD
 | `packages/rulesync-provider` | `.rulesync` detect/validate、safe enumeration、Programmatic API staging、ChangeSet |
 | `packages/ui` | Phase A workbench、Monaco Editor/DiffEditor、inert sanitized Markdown |
 | `tests/integration`, `tests/e2e` | real Rulesync/application integration and sandboxed Electron UI flow |
+
+## v1.0 Modules (M0–M7)
+
+| File/package | Responsibility |
+| --- | --- |
+| `packages/core/src/v2/identity.ts`、`project-binding.ts`、`profiles.ts` | 稳定 repository/project/asset/harness 身份、ProjectDefinition、profile 优先级 |
+| `packages/core/src/v2/repo-layout.ts`、`ruleswitch-yaml.ts` | Config Repo layout 与 typed manifest 解析 |
+| `packages/core/src/v2/reconcile.ts`、`reconcile-engine.ts`、`conflict.ts` | B/L/D 真值表、ApplyMode 解析、冲突模型 |
+| `packages/core/src/v2/apply-plan.ts`、`batch-apply.ts` | 逐目标计划（含 needs-adoption / add-only 短路）与 journaled batch |
+| `packages/core/src/v2/git-port.ts` | FF-only、scoped commit、fetch+revalidate push、Index 契约 |
+| `packages/core/src/v2/harness-adapter.ts`、`harness-capabilities.ts` | Adapter 7 方法契约与四 Harness 能力矩阵（路径 + 每 kind 能力） |
+| `packages/core/src/v2/stores.ts`、`ipc-v2-channels.ts` | versioned store envelope / 迁移 gate；21 个 v2 通道与 `ApplyOutcome` |
+| `apps/desktop/src/main/application/capabilities-v2.ts` | 唯一 v2 读写入口：read model + 编辑器读取 + apply 目标解析 |
+| `apps/desktop/src/main/infrastructure/git/*` | Git runtime/porcelain、identity/binding/sync-state、credential diagnostics |
+| `apps/desktop/src/main/infrastructure/harness/*` | adapter v2 渲染与 skill slice 事务写入（snapshot→write→verify） |
+| `packages/ui/src/app-v2.tsx`、`dialog.tsx`、`*-model.ts` | 七页 shell、应用内确认面、纯函数 model 层 |
 
 ## Frozen Model and Revisions
 

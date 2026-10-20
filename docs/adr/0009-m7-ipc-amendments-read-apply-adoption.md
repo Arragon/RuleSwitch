@@ -1,0 +1,74 @@
+# ADR-0009 · M7 IPC amendments: repository file read, apply target selection, adoption gate
+
+- 状态：**Accepted（2026-10-20）**
+- 范围：`packages/core/src/v2/ipc-v2-channels.ts`、`apps/desktop/src/main/ipc-v2.ts`、`apps/desktop/src/preload/index.ts`、`apps/desktop/src/main/application/capabilities-v2.ts`
+- 关联：INH-1757（v2 IPC 契约）、INH-1852（多工具/逐目标模式）、INH-1853（仓库编辑）、INH-1814（Preview/结果面）、INH-1809（adoption）
+
+## 背景
+
+M7 实机核对（2026-10-20）发现三处实现与已冻结契约/验收不一致，必须在 UI 层补齐前先修正协议层，否则只能在 Renderer 里伪造结果：
+
+1. **仓库编辑不可用**：`library.editFile` 存在，但 `LibraryEntryDto` 不携带内容，Renderer 无任何读取通道，编辑界面无法预填内容（只能空覆盖，违反安全不变量）。
+2. **应用目标不可选择**：`apply.toHarnesses` 只接受 `assets` + 单一 `mode`，Main 内部把 `assetKind` 硬编码为 `"skills"`，并把 `firstAdoptionConfirmed` 硬编码为 `true`——即绕过 adoption，且非 skill 资产被当成 skill 计划。
+3. **无逐目标结果**：响应只返回 `batchId`，UI 无法显示 per-target journal（INH-1814 要求）。
+
+## 决定
+
+### 1. 新增只读通道 `ruleswitch:v2:assets:read-file`
+
+- 方法名 `library.readFile`，API `readRepoFile(logicalPath)`。
+- 请求 `{ logicalPath }`（= `assetKey`，source-relative、opaque），响应 `{ logicalPath, contentBase64 } | null`。
+- Main 每次调用都对当前仓库重跑 inventory 解析，未知路径返回 `null`；不引入通用 `readFile`/path 能力，不接受绝对路径。
+
+### 2. `apply.toHarnesses` 增加两个**可选**字段（向后兼容）
+
+```text
+targets?: { harnessInstanceId, mode?, scope?: {kind:"global"} | {kind:"project", projectId} }[]
+confirmAdoption?: boolean
+```
+
+- 省略 `targets` 时保持旧行为：所有**已安装且已登记**的 harness、global scope、请求级 mode。
+- 提供 `targets` 时为穷尽选择：未登记的 harness 直接抛错（不自动配置）；已安装=false 或 project 未绑定 → 进入 journal 的 blocked 条目，不静默降级为 global。
+- `mode` 由目标级 `mode` 覆盖请求级 `mode`。
+- `confirmAdoption` 默认 `false`。目标已存在且无基线 → `needs-adoption`，未确认则不写。
+
+### 3. 响应从 `{ batchId }` 扩展为 `ApplyOutcome`
+
+`{ batchId, status, appliedCount, blockedCount, failedCount, entries[] }`，`entries` 携带 `harnessInstanceId / adapterId / displayName / scopeKind / projectId / assetKind / mode / action / state / detail`。仍不含任何绝对路径。
+
+### 4. 资产种类与路径能力改由数据驱动
+
+- 计划条目按 **(目标 × 资产种类)** 生成，`assetKind` 取自资产本身。
+- harness 根目录与每类能力取自 `HARNESS_MATRIX` / `matrixKindsFor`，删除 `capabilities-v2` 内硬编码的 `.claude/.codex/.cursor/.config/opencode` 映射。
+
+### 5. `add-only` 语义修正（`packages/core/src/v2/apply-plan.ts`）
+
+`add-only` 与已存在目标组合时，`skip-add-only-exists` 必须先于 `needs-adoption` 判定。原顺序会对“绝不覆盖”的模式反而要求用户确认接管，属策略缺陷。
+
+## 备选方案与否决理由
+
+| 方案 | 否决理由 |
+| --- | --- |
+| 把内容塞进 `LibraryEntryDto` | 读模型携带全部资产字节，二进制/大文件代价高，且扩大每次浏览的传输面 |
+| 让 Renderer 传内容 + 路径 | 违反 Renderer 无路径、无内容真源的安全边界 |
+| 用 `targets` 为空数组表示“全部” | 与“零选择不执行”冲突，语义易被误读 |
+| 保持 `confirmAdoption` 恒 true | 直接绕过首次接管确认，违反冻结安全不变量 |
+| 在 UI 层做 adoption 判断 | 安全决策下沉到 Renderer，Main 无法自证 |
+
+## 影响与兼容性
+
+- 三个新增请求字段全为可选，旧调用方（preload、既有测试）行为不变。
+- `IPC_V2_METHODS` 从 20 增至 21；`assertV2Surface` 全空对象期望值同步为 21。
+- Phase A `ruleswitch:v1:*` 7 方法未改动；preload 现为三处暴露（`ruleswitch` / `ruleswitchV2` / `ruleswitchV1SmokeMode`），符合 `docs/v1/contracts/ipc-v2-and-stores.md` 第 2 条兼容窗口。
+- 未新增 runtime 依赖。
+
+## 验证
+
+- `capabilities-v2.apply.unit.test.ts`：7 条（仓库字节写入、按种类生成两条目、未确认 adoption 不写、确认后写入、逐目标 add-only、未登记拒绝、未绑定项目 blocked、未安装 blocked）。
+- `app-v2.e2e.spec.ts`：新增“应用内 dialog 取代原生 prompt”“未登记工具不会被自动配置”两条真实 Electron 用例。
+- 全量：typecheck / lint / 259 unit / 69 integration / 8 E2E 均通过（macOS，Electron 43.4.1）。
+
+## 残余
+
+- `hasOwnership` 仍恒为 `false`（尚未接入 INH-1781 的 SyncBaseline store），因此任何已存在目标都会走 `needs-adoption`。这是**安全方向的保守偏差**，不是静默放行；接入基线后应改为按目标查询 ownership。
+- project scope 的 capability 与路径已按矩阵实现，但 UI 尚未提供项目绑定（INH-1855），因此当前仅 global 可在界面选择。

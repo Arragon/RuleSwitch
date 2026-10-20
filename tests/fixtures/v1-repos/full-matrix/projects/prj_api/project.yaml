@@ -1,0 +1,4 @@
+projectId: prj_api
+displayName: API 服务
+gitRemotes:
+  - git://github.com/acme/api

@@ -1,0 +1,3 @@
+description: strict profile
+replacements:
+  instructions/AGENTS.md: "# replaced by strict profile\n"
