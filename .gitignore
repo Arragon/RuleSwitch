@@ -33,3 +33,9 @@ Thumbs.db
 # IDE local state (do not commit local-only settings)
 .vscode/
 .idea/
+
+# Local tool state and generated deliverables (reports are produced per run)
+.mimosa/
+.workbuddy/
+.zcodeignore
+/outputs/

@@ -8,8 +8,8 @@
     "./styles.css": "./src/styles.css"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "corepack pnpm --filter @ruleswitch/core run build && tsc -p tsconfig.json --noEmit",
+    "typecheck": "corepack pnpm --filter @ruleswitch/core run build && tsc -p tsconfig.json --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {

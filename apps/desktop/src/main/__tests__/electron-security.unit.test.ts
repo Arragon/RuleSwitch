@@ -40,10 +40,15 @@ describe("Electron capability boundary", () => {
     expect(source).not.toContain("event.senderFrame !== mainWindowContents.mainFrame");
   });
 
-  test("exposes only the named ruleswitch DesktopApi bridge", async () => {
+  test("exposes only the two named bridges plus the v1 smoke flag", async () => {
     const source = await readFile(preloadSource, "utf8");
     expect(source).toContain('contextBridge.exposeInMainWorld("ruleswitch", ruleswitch)');
-    expect(source.match(/exposeInMainWorld/g)).toHaveLength(1);
+    expect(source).toContain('contextBridge.exposeInMainWorld("ruleswitchV2", ruleswitchV2)');
+    // Exactly three exposures: frozen v1 7-method API, versioned v2
+    // read-model API (M0 INH-1757), and the boolean v1-smoke-mode flag for
+    // the walking-skeleton E2E. No generic fs/shell/path bridge.
+    expect(source.match(/exposeInMainWorld/g)).toHaveLength(3);
+    expect(source).toContain('exposeInMainWorld("ruleswitchV1SmokeMode", v1SmokeMode)');
     expect(source).not.toContain("ipcRenderer:");
     for (const method of [
       "openWorkspace",
@@ -56,5 +61,26 @@ describe("Electron capability boundary", () => {
     ]) {
       expect(source).toContain(`${method}:`);
     }
+    // v2 surface is exactly the frozen method set — no extras.
+    for (const method of [
+      "openRepositoryFromDirectory",
+      "repositoryStatus",
+      "browseLibrary",
+      "gitArea",
+      "setCompare",
+      "listProjects",
+      "listHarnesses",
+      "operationHistory",
+      "getSettings",
+      "setTheme"
+    ]) {
+      expect(source).toContain(`${method}:`);
+    }
+    expect(source).toContain("IPC_V2_CHANNELS");
+    // Request schemas are enforced Main-side (ipc-v2.ts) — the preload sends
+    // plain DTOs, the Main validates against the frozen registry.
+    const ipcV2Source = await readFile(new URL("../ipc-v2.ts", import.meta.url), "utf8");
+    expect(ipcV2Source).toContain("IPC_V2_REQUEST_SCHEMAS");
+    expect(ipcV2Source).toContain("schema.safeParse");
   });
 });

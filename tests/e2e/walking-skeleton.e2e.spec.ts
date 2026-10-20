@@ -2,9 +2,10 @@ import { cp, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { _electron as electron, expect, test, type ElectronApplication } from "@playwright/test";
+import { expect, test, type ElectronApplication } from "@playwright/test";
 
-const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+import { launchDesktopApp, repositoryRoot } from "./launcher";
+
 const fixtureRoot = path.join(repositoryRoot, "tests", "fixtures", "rulesync-provider", "workspace");
 
 test("walks the real sandboxed Electron UI from source review through restore", async () => {
@@ -18,18 +19,15 @@ test("walks the real sandboxed Electron UI from source review through restore", 
   const unknownPath = path.join(workspaceRoot, "unmanaged.txt");
   const originalAgents = await readFile(agentsPath);
   const originalUnknown = await readFile(unknownPath);
-  const environment = { ...process.env };
-  delete environment.ELECTRON_RUN_AS_NODE;
-  environment.RULESWITCH_SMOKE_WORKSPACE = workspaceRoot;
 
   let electronApp: ElectronApplication | undefined;
   try {
-    electronApp = await electron.launch({
-      args: [path.join(repositoryRoot, "apps", "desktop"), `--user-data-dir=${appDataRoot}`],
-      cwd: repositoryRoot,
-      env: environment
+    const launched = await launchDesktopApp({
+      extraArgs: [`--user-data-dir=${appDataRoot}`],
+      env: { RULESWITCH_SMOKE_WORKSPACE: workspaceRoot }
     });
-    const page = await electronApp.firstWindow();
+    electronApp = launched.electronApp;
+    const page = launched.page;
     const rendererErrors: string[] = [];
     page.on("pageerror", (error) => rendererErrors.push(error.message));
     page.on("console", (entry) => {

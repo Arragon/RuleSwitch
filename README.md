@@ -1,10 +1,28 @@
 # RuleSwitch
 
-RuleSwitch 是跨平台 AI Coding Configuration Manager。它以 provider-neutral contracts 管理配置，v0.1 首个 provider 使用 Rulesync；生成内容必须先进入 staging，经 Preview/Diff、Snapshot、Apply/Verify 后才写 workspace。
+RuleSwitch 是 **Personal Agent Environment as Code**：一个普通 Git 仓库是配置的唯一持久同步事实源，RuleSwitch 负责把它安全投影到本机各 AI 工具的 global / project 配置，并支持反向 Capture → Commit → Publish。
 
-## Phase A Scope
+## 当前状态（v1.0 主线）
 
-当前 Phase A walking skeleton 已实现：
+- **M0–M6 已实现并在 macOS 验证**：v2 契约、GitPort + 稳定身份、Config Repo / Asset Graph、One-Skill 与 Project AGENTS 双向纵切、B/L/D reconcile + journaled batch apply、配置类型扩展、四 Harness（Claude Code / Codex / Cursor / OpenCode）adapter 与 conformance。
+- **M7 产品 UI 进行中**：`packages/ui/src/app-v2.tsx` 为七页 shell，消费只读 v2 read model；配置库支持按工具选择目标、逐目标模式、adoption 确认与逐目标结果，并可在应用内编辑/删除仓库资产。
+- **M8–M10 未开始**（GA 加固、Windows、Linux）。
+
+最近一次 macOS 实测（Electron 43.4.1）：`typecheck` 4 workspace 通过、`lint` 0 error、unit 259、integration 69、E2E 8。Linux 未测试。
+
+```text
+Remote Git
+  ↕
+Local Config Repo
+  ↕
+Asset / Project / Binding Graph
+  ↕
+Bidirectional Reconcile + Conversion
+  ↕
+Safe Harness Projection
+```
+
+## Phase A（历史基线，仍保留于兼容窗口）
 
 ```text
 Open Workspace
@@ -19,24 +37,26 @@ Open Workspace
 → transactional Restore
 ```
 
-这是一个真实、安全的最小纵切，不是完整 v0.1。当前仅支持一个 Universal Rulesync profile、`codexcli` 的 `rules` feature；v1-compatible Phase B UI 已增加按 Rules / Skills / Commands / MCP / Other 分组的全 source browser、统一多格式只读 Viewer、frontmatter/Markdown 分区预览，以及全 ChangeSet 文件选择。没有 watcher/external-change auto refresh、Recent Workspace/Profile persistence、多 target UI、跨重启 history rebind 或 recovery repair UI；被冻结 IPC 阻塞的能力记录在 Proposed ADR-0005。
+Phase A 的 transaction / snapshot / ownership / path 语义是 v1 复用的安全基线，由 `tests/integration/walking-skeleton.integration.test.ts` 与 `tests/e2e/walking-skeleton.e2e.spec.ts` 持续守护。
 
 ## Architecture
 
-四层运行时方向：
+四层运行时方向（v2 在同一方向内增加 purpose-built 通道，不改变分层）：
 
 ```text
 React/Monaco Renderer
-→ typed Preload + 7-method IPC capability boundary
-→ RuleSwitchApplication + @ruleswitch/core
-→ Rulesync / Electron platform / filesystem and store adapters
+→ typed Preload + Main IPC capability boundary（v1 7 methods + v2 21 channels）
+→ RuleSwitchApplication / CapabilityServiceV2 + @ruleswitch/core
+→ GitPort / Harness adapters / Electron platform / filesystem and store adapters
 ```
 
-- `packages/core`：冻结 v1 domain、Zod schemas、ports、IPC、SHA-256 revision、transaction state machine。
+- `packages/core`：Phase A 冻结 domain、Zod schemas、ports、IPC、SHA-256 revision、transaction state machine；`src/v2/` 为 v1 契约（identity/reconcile/apply-plan/batch-apply/git-port/harness-adapter/stores/ipc-v2-channels）。
 - `packages/rulesync-provider`：Rulesync 16.14.0 detect/validate/stage/preview；Programmatic API only。
-- `apps/desktop`：Electron composition root、hardened window/preload、resource registry/path policy、transactions/stores。
-- `packages/ui`：Phase A workbench、Monaco Editor/DiffEditor、sanitized inert Markdown。
-- `tests/integration`、`tests/e2e`：真实 Rulesync/application 与 Playwright Electron flow。
+- `apps/desktop`：Electron composition root、hardened window/preload、resource registry/path policy、transactions/stores、GitPort 与 Harness adapter。
+- `packages/ui`：v2 七页 workbench、Phase A workbench、Monaco Editor/DiffEditor、sanitized inert Markdown。
+- `tests/integration`、`tests/e2e`：真实 Rulesync/application/Git 与 Playwright Electron flow（E2E 统一 launcher）。
+
+v1 契约与安全边界见 `docs/v1/`、`docs/architecture/`、`docs/adr/`（含 ADR-0006 … ADR-0009）。
 
 这是运行时四层。构建/包装上，desktop 不直接依赖 Rulesync并 externalize `@ruleswitch/rulesync-provider`；provider 用自己的 esbuild 0.27.7 把 adapter 内部模块 bundle 为单一 ESM 入口，Rulesync 仍是 provider 的 external dependency。该包装方式不改变运行时层次。
 

@@ -14,8 +14,8 @@
     "typecheck": "corepack pnpm -r --if-present run typecheck",
     "lint": "eslint .",
     "test": "corepack pnpm run test:unit && corepack pnpm run test:integration",
-    "test:unit": "vitest run --config vitest.unit.config.ts",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:unit": "corepack pnpm --filter @ruleswitch/core run build && vitest run --config vitest.unit.config.ts",
+    "test:integration": "corepack pnpm --filter @ruleswitch/core run build && corepack pnpm --filter @ruleswitch/rulesync-provider run build && vitest run --config vitest.integration.config.ts",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

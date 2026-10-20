@@ -10,8 +10,9 @@
 2. `README.md`
 3. `docs/architecture.md`
 4. `docs/architecture/**`
-5. `docs/adr/**`
-6. `docs/know-how.md`
+5. `docs/adr/**`（v1 主线关键决策：0006 技术基线与 Strangler、0007 Config Repo 存储关系、0008 macOS Git runtime、0009 M7 IPC 修订）
+6. `docs/v1/**`（冻结契约与 threat model）
+7. `docs/know-how.md`
 7. 根 `package.json`、相关 package 的 `package.json`、`pnpm-workspace.yaml`
 8. 相关源码、fixtures 和 tests
 
@@ -19,14 +20,15 @@
 
 ## Current Repository Facts
 
-- Phase A walking skeleton 已实现：Electron Main/Preload/Renderer、RulesyncProvider、React/Monaco UI、resource registry/path policy、filesystem-first Apply/Restore transaction stores、integration 和 Playwright E2E。
-- Windows 实测环境：Node 22.18.0、Electron 43.4.1；unit 35、integration 13、E2E 1。
-- 实测链路包含中文+空格 workspace、Raw/Rendered、真实 system default open、Rulesync staging、Monaco Generated/Diff、Apply/Verify/History/Restore、BOM+CRLF exact restore、unknown file unchanged；integration 还覆盖 create/delete/反向 Restore ownership、commit metadata failure rollback 和篡改 snapshot traversal 拒绝。
-- macOS/Linux 未测试；fixtures/abstraction 不能代替 native runner。
-- Phase A 仅支持 Rulesync `codexcli/rules` 单 target；UI 只展示 ChangeSet 第一项；无 watcher/auto refresh，`chokidar` 尚未依赖并留待 Phase B 引入。
-- Workspace ID 按 session 随机，跨重启 history rebind 未实现；完整 crash repair 是 P2 残余，当前只有 manifest scan + mutation gate，无 repair UI。
-- Path-based write 的 check/use 间 TOCTOU 仍是 P2 残余；现有 canonical/realpath/preflight 复验不代表已消除该竞态。逐 crash phase、rollback itself failure 与 native 平台矩阵仍未测全。
-- Packaging/signing/CI 未执行；Monaco bundle 较大。
+- v1.0 主线（M0–M6）已实现并在 macOS 验证：v2 contracts、GitPort + 稳定身份、Config Repo layout / Asset Graph、One-Skill 与 Project AGENTS 双向纵切、B/L/D reconcile + journaled batch apply、配置类型扩展、四 Harness（Claude Code / Codex / Cursor / OpenCode）adapter 与 conformance。
+- M7 产品 UI 进行中：`packages/ui/src/app-v2.tsx` 为七页 shell（Overview / 配置库 / 本机 AI 工具 / 项目 / 同步变更 / 历史 / 设置），消费只读 v2 read model；Phase A v1 workbench 在兼容窗口内保留（`RULESWITCH_SMOKE_WORKSPACE` 触发 v1 smoke 渲染）。
+- 2026-10-20 macOS 实测（Electron 43.4.1）：typecheck 4 workspace 通过；lint 0 error；unit 259；integration 69（真实 bare remote、FF-only、remote race、Index 三版本 diff、discard 备份）；E2E 8（v2 shell 6 + Phase A walking skeleton 1 + 交互 1）。
+- Phase A 原始证据为 Windows（Node 22.18.0 / Electron 43.4.1）；macOS 已由上述 run 覆盖；Linux 未测试。fixtures/abstraction 不能代替 native runner。
+- 仓库文件读取、应用目标选择、adoption 门禁的协议变更见 ADR-0009；`IPC_V2_METHODS` 现为 21。
+- `hasOwnership` 在 apply 路径仍恒为 false（未接 INH-1781 SyncBaseline store），因此已存在目标一律走 `needs-adoption`；这是保守偏差，不是静默放行。
+- M7 未完成面：onboarding 无 clone/credential/manifest 校验、统一 Preview/Diff 面、本机工具与项目详情页仍为只读列表、仓库内逐项处理、Recovery Center、packaging/signing/CI。M8–M10 未开始。
+- Workspace/repository 稳定身份已落地；跨重启 history rebind 由 v2 stores 承担，旧 unversioned ledger 只读保留。完整 crash repair UI 仍缺（manifest scan + mutation gate 已有）。
+- 构建派生陷阱：`packages/*` 与 `apps/*` 的 unit/integration 测试解析 `@ruleswitch/core` 的 **dist**，因此 `test:unit` / `test:integration` / `packages/ui` 的 `build`+`typecheck` 都先构建 core；改 core 源码后不要直接跑 vitest，否则会对着旧产物得到假结果。
 - Node engine `>=22.13.0`，pnpm 固定 11.24.0；当前环境裸 `pnpm` 不在 PATH。
 
 ## Architecture and Dependencies
@@ -46,13 +48,14 @@ Renderer / packages/ui
 
 Package/module responsibilities：
 
-- `packages/core`：provider-neutral domain、strict schemas、ports、7-method IPC、revision/state rules；
-- `packages/rulesync-provider`：Rulesync 16.14.0 detect/validate/stage/preview；
+- `packages/core`：provider-neutral domain、strict schemas、ports、Phase A 7-method IPC、v2 contracts（`src/v2/`：identity/reconcile/apply-plan/batch-apply/git-port/harness-adapter/stores/ipc-v2-channels）、revision/state rules；
+- `packages/rulesync-provider`：Rulesync 16.14.0 detect/validate/stage/preview，并作为受控 converter（`rulesync-converter.ts`）；
 - `apps/desktop/src/main`：window/IPC/application composition、authorization、transactions；
-- `apps/desktop/src/main/infrastructure`：Electron platform、resource registry/path policy、atomic fs/stores；
-- `apps/desktop/src/preload`：仅暴露 frozen `DesktopApi`；
-- `packages/ui`：Phase A workbench、Monaco、sanitized Markdown；
-- `tests/integration`、`tests/e2e`：真实 provider/application 和 Electron flow。
+- `apps/desktop/src/main/application/capabilities-v2.ts`：唯一 v2 读模型与写能力入口（21 通道）；
+- `apps/desktop/src/main/infrastructure`：Electron platform、resource registry/path policy、atomic fs/stores、`git/`（runtime/porcelain/identity/binding/sync-state）、`harness/`（adapter v2 / skill slice）；
+- `apps/desktop/src/preload`：暴露 frozen `DesktopApi`、`DesktopApiV2` 与 v1-smoke 布尔标志；
+- `packages/ui`：v2 七页 workbench（`app-v2.tsx` + model 层 + `dialog.tsx` 确认面）与 Phase A workbench、Monaco、sanitized Markdown；
+- `tests/integration`、`tests/e2e`：真实 provider/application 与 Electron flow；E2E 统一走 `tests/e2e/launcher.ts`。
 
 ## Frozen v1 Baseline
 
@@ -78,8 +81,9 @@ L3 若需修改 Provider contract、Native Provider compatibility、transaction/
 ## Security and Data Safety
 
 - BrowserWindow：sandbox/contextIsolation on、nodeIntegration off；deny new window/navigation/redirect/webview；保持 CSP。
-- Preload 仅 7 methods；Main 同时匹配 IPC `sender` 与 main frame 的 `processId`/`routingId`；Preload/Main 双向 schema validation。
-- 不增加 generic filesystem/shell/command/path/URL capability；`openExternal` 只授权 `origin:"source"` resource。
+- Preload 暴露面锁定为三处：frozen v1 `DesktopApi`（7 methods）、`DesktopApiV2`（21 个 purpose-built 通道，见 ADR-0009）、`ruleswitchV1SmokeMode` 布尔标志。`electron-security.unit.test.ts` 断言这三处；新增第四处需 ADR。Main 同时匹配 IPC `sender` 与 main frame 的 `processId`/`routingId`；Preload/Main 双向 schema validation。
+- v2 通道只接受 opaque 逻辑名/稳定 ID（`repo_/prj_/asset_/harn_/dev_`），不得新增通用 filesystem/shell/command/path/URL 能力；`readRepoFile` 每次对当前仓库重跑 inventory 解析，未知路径返回 null。
+- `openExternal` 只授权 `origin:"source"` resource。
 - Opaque resource ID 在 Main registry 绑定 workspace/root/canonical path/operation；每次操作重验 realpath/containment/case。
 - Markdown raw HTML 不执行，sanitize 后所有 link inert。
 - Rulesync source 调用前后枚举/realpath；仅允许 source-root 内 symlink，staging/target 拒绝 symlink。

@@ -4,9 +4,15 @@
 
 ## Runtime and Commands
 
-- 根要求 Node `>=22.13.0`、pnpm `11.24.0`；Windows 验证环境为 Node 22.18.0、Electron 43.4.1。
+- 根要求 Node `>=22.13.0`、pnpm `11.24.0`；Windows 验证环境为 Node 22.18.0、Electron 43.4.1；macOS 验证环境 Electron 43.4.1。
 - 当前环境裸 `pnpm` 不在 PATH；从仓库根使用 `corepack pnpm ...`。E2E 前先 `corepack pnpm run build`。
 - `RULESWITCH_SMOKE_WORKSPACE` 是 Main-only test override，不扩展 Renderer 的空 `openWorkspace` DTO。
+- **测试解析 dist，不是 src**：`apps/**` 与 `packages/**` 的 unit/integration 通过 node_modules 解析 `@ruleswitch/core` 的 `dist`。因此 `test:unit`、`test:integration`、`packages/ui` 的 `build`/`typecheck` 都先构建 core；只改 core 源码后直接跑 vitest 会对着旧产物得到假结果。遇到“源码改了但测试行为没变”先检查 dist 时间戳。
+- E2E 统一走 `tests/e2e/launcher.ts`，支持 `RULESWITCH_E2E_ELECTRON`（可执行路径）与 `RULESWITCH_E2E_ELECTRON_ARGS`（附加参数）两个环境变量，并总是剥离 `ELECTRON_RUN_AS_NODE`。
+- 若父进程导出 `ELECTRON_RUN_AS_NODE=1`，`electron --version` 会返回 Node 版本、ESM main 在 `import ... from "electron"` 处报 “does not provide an export named 'BrowserWindow'”。验证 Electron 行为前先 `env -u ELECTRON_RUN_AS_NODE`。
+- 受限 runner（容器/嵌套沙箱）里 Chromium 进程沙箱会失败（`sandbox initialization failed: Operation not permitted`，随后 GPU/network service crash）。这不等于应用缺陷；用 `RULESWITCH_E2E_ELECTRON_ARGS="--no-sandbox --disable-gpu"` 复现，正式 CI 不应带该参数。
+- 某些沙箱会拦截 pnpm 的项目注册 symlink（`EEXIST ... pnpm/store/v11/projects/*`）。可用 `corepack pnpm --config.verify-deps-before-run=false run <script>` 绕过自动 install 校验；这是环境限制，不写进仓库配置。
+
 
 ## Current Phase A Facts
 

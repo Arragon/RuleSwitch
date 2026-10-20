@@ -786,3 +786,342 @@ h2 {
     transition-duration: .01ms !important;
   }
 }
+
+/* ------------------------------------------------------------------------- */
+/* AppV2 shell (M7)                                                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The v2 shell previously shipped with no stylesheet at all: `data-theme` was
+ * only an attribute. These rules give the shell a real light/dark surface,
+ * reusing the existing token names so there is still a single design system.
+ */
+
+.app-v2 {
+  --v2-canvas: #f7f5f1;
+  --v2-surface: #ffffff;
+  --v2-border: #ded8cc;
+  --v2-text: #211f1a;
+  --v2-muted: #6b665c;
+  --v2-accent: #8a5a12;
+  --v2-danger: #a2352a;
+  --v2-ok: #2f6b3f;
+
+  display: grid;
+  grid-template-columns: 216px 1fr;
+  min-height: 100vh;
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+  font-size: 14px;
+}
+
+.app-v2[data-theme="dark"] {
+  --v2-canvas: #11130f;
+  --v2-surface: #181a16;
+  --v2-border: #34372f;
+  --v2-text: #e6e2d8;
+  --v2-muted: #999b91;
+  --v2-accent: #e0b261;
+  --v2-danger: #d27e6f;
+  --v2-ok: #74aa7e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-v2[data-theme="system"] {
+    --v2-canvas: #11130f;
+    --v2-surface: #181a16;
+    --v2-border: #34372f;
+    --v2-text: #e6e2d8;
+    --v2-muted: #999b91;
+    --v2-accent: #e0b261;
+    --v2-danger: #d27e6f;
+    --v2-ok: #74aa7e;
+  }
+}
+
+.app-v2-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  border-right: 1px solid var(--v2-border);
+  background: var(--v2-surface);
+}
+
+.app-v2-nav .nav-item {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--v2-muted);
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-v2-nav .nav-item:hover {
+  background: color-mix(in srgb, var(--v2-text) 6%, transparent);
+  color: var(--v2-text);
+}
+
+.app-v2-nav .nav-item.active {
+  background: color-mix(in srgb, var(--v2-accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--v2-accent) 40%, transparent);
+  color: var(--v2-accent);
+  font-weight: 600;
+}
+
+.app-v2-nav .nav-item:focus-visible,
+.app-v2 button:focus-visible,
+.app-v2 select:focus-visible,
+.app-v2 input:focus-visible,
+.app-v2 textarea:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: 2px;
+}
+
+.app-v2-main {
+  padding: 24px 28px 48px;
+  max-width: 1080px;
+  overflow-x: auto;
+}
+
+.app-v2-main h1 {
+  font-size: 20px;
+  margin: 0 0 12px;
+}
+
+.app-v2-main h2 {
+  font-size: 15px;
+  margin: 20px 0 8px;
+}
+
+.app-v2-main h3 {
+  font-size: 13px;
+  margin: 16px 0 6px;
+  color: var(--v2-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.app-v2-main p {
+  margin: 6px 0;
+  line-height: 1.55;
+}
+
+.app-v2 button {
+  appearance: none;
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--v2-border);
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  cursor: pointer;
+}
+
+.app-v2 button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--v2-accent) 50%, var(--v2-border));
+}
+
+.app-v2 button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.app-v2 button.danger {
+  border-color: color-mix(in srgb, var(--v2-danger) 55%, var(--v2-border));
+  color: var(--v2-danger);
+}
+
+.app-v2 select,
+.app-v2 input[type="text"],
+.app-v2 textarea {
+  font: inherit;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--v2-border);
+  background: var(--v2-surface);
+  color: var(--v2-text);
+}
+
+.app-v2 textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.app-v2-error {
+  color: var(--v2-danger);
+  border: 1px solid color-mix(in srgb, var(--v2-danger) 45%, var(--v2-border));
+  background: color-mix(in srgb, var(--v2-danger) 8%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.app-v2-hint {
+  color: var(--v2-muted);
+  font-size: 12.5px;
+}
+
+.app-v2-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.app-v2-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--v2-muted);
+}
+
+.app-v2-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--v2-border);
+  border-radius: 6px;
+  background: var(--v2-surface);
+}
+
+.app-v2-list > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--v2-border);
+}
+
+.app-v2-list > li:last-child {
+  border-bottom: none;
+}
+
+.app-v2-asset {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.app-v2-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--v2-surface);
+  border: 1px solid var(--v2-border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.app-v2-table th,
+.app-v2-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--v2-border);
+}
+
+.app-v2-table th {
+  color: var(--v2-muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.app-v2-table tr:last-child td {
+  border-bottom: none;
+}
+
+.app-v2-editor {
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.app-v2-outcome {
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface);
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+
+.app-v2-outcome ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--v2-muted);
+}
+
+.draft-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--v2-accent) 45%, var(--v2-border));
+  color: var(--v2-accent);
+}
+
+.app-v2-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 42%);
+  z-index: 50;
+}
+
+.app-v2-dialog {
+  width: min(440px, calc(100vw - 48px));
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  border: 1px solid var(--v2-border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 32%);
+}
+
+.app-v2-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.app-v2-dialog p {
+  color: var(--v2-muted);
+  line-height: 1.55;
+}
+
+.app-v2-dialog[data-tone="danger"] h2 {
+  color: var(--v2-danger);
+}
+
+.app-v2-dialog-field {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 4px;
+  font-size: 12.5px;
+  color: var(--v2-muted);
+}
+
+.app-v2-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.app-v2-dialog-actions button:last-child {
+  border-color: color-mix(in srgb, var(--v2-accent) 55%, var(--v2-border));
+  color: var(--v2-accent);
+}
+
+.app-v2-dialog-actions button.danger {
+  border-color: color-mix(in srgb, var(--v2-danger) 60%, var(--v2-border));
+  color: var(--v2-danger);
+}
