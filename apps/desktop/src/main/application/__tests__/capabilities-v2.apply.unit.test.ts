@@ -577,6 +577,127 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     expect(available).toBeUndefined();
   }, 90_000);
 
+  it("refuses to restore a corrupt snapshot payload and never overwrites the target", async () => {
+    const { repo, home, root, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# user local\n", "utf8");
+
+    const applied = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      confirmAdoption: true,
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    expect(applied.appliedCount).toBe(1);
+
+    // Corrupt the recorded pre-apply payload.
+    const blobPath = path.join(root, "state", "batch-snapshots", applied.batchId, "files", "0.bin");
+    await writeFile(blobPath, "tampered payload\n", "utf8");
+
+    const rolledBack = await service.rollbackBatch(applied.batchId);
+    expect(rolledBack.ok).toBe(false);
+    expect(rolledBack.restored).toBe(0);
+    expect(rolledBack.failed).toBe(1);
+    expect(rolledBack.reason).toMatch(/integrity/);
+    expect(rolledBack.status).toBe("RECOVERY_REQUIRED");
+
+    // Integrity before impact: the target still holds the applied bytes
+    // rather than the corrupt payload nobody can vouch for.
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# global\n");
+
+    const recovery = await service.recoveryStatus();
+    const batch = recovery.batches.find((entry) => entry.batchId === applied.batchId);
+    expect(batch?.status).toBe("RECOVERY_REQUIRED");
+    expect(batch?.targets.some((entry) => entry.state === "ROLLBACK_FAILED")).toBe(true);
+  }, 90_000);
+
+  it("reports a rollback write failure instead of throwing, leaving the target untouched", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# user local\n", "utf8");
+
+    const applied = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      confirmAdoption: true,
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    expect(applied.appliedCount).toBe(1);
+
+    // The restore write cannot land: the harness root is read-only.
+    const codexRoot = path.join(home, ".codex");
+    await chmod(codexRoot, 0o555);
+    let rolledBack: Awaited<ReturnType<typeof service.rollbackBatch>>;
+    try {
+      rolledBack = await service.rollbackBatch(applied.batchId);
+    } finally {
+      await chmod(codexRoot, 0o755);
+    }
+
+    expect(rolledBack.ok).toBe(false);
+    expect(rolledBack.failed).toBe(1);
+    expect(rolledBack.reason).toMatch(/write\/verify failure/);
+    expect(rolledBack.status).toBe("RECOVERY_REQUIRED");
+    // The applied bytes are intact — a failed restore must not half-write.
+    expect(await readFile(path.join(codexRoot, "AGENTS.md"), "utf8")).toBe("# global\n");
+  }, 90_000);
+
+  it("rolls back the targets it can and only marks the target whose payload failed", async () => {
+    const { repo, home, root, service } = await createService([
+      { harnessInstanceId: "harn_a", adapterId: "codex", displayName: "Codex", installed: true },
+      { harnessInstanceId: "harn_b", adapterId: "opencode", displayName: "OpenCode", installed: true }
+    ]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await mkdir(path.join(home, ".config", "opencode"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# codex local\n", "utf8");
+    await writeFile(path.join(home, ".config", "opencode", "AGENTS.md"), "# opencode local\n", "utf8");
+
+    const applied = await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      confirmAdoption: true,
+      targets: [{ harnessInstanceId: "harn_a" }, { harnessInstanceId: "harn_b" }]
+    });
+    expect(applied.appliedCount).toBe(2);
+
+    // Corrupt only the second target's payload.
+    const batchDir = path.join(root, "state", "batch-snapshots", applied.batchId);
+    const manifest = JSON.parse(await readFile(path.join(batchDir, "manifest.json"), "utf8")) as {
+      targets: { targetKey: string; files: { blobFile: string }[] }[];
+    };
+    const failingTarget = manifest.targets.find((target) => target.targetKey.includes("harn_b"));
+    const failingBlob = failingTarget?.files[0]?.blobFile;
+    if (failingBlob === undefined) {
+      throw new Error("expected a recorded snapshot payload for harn_b");
+    }
+    await writeFile(path.join(batchDir, failingBlob), "tampered\n", "utf8");
+
+    const rolledBack = await service.rollbackBatch(applied.batchId);
+    expect(rolledBack.ok).toBe(false);
+    expect(rolledBack.restored).toBe(1);
+    expect(rolledBack.failed).toBe(1);
+
+    // The intact target really was restored; the failed one keeps bytes.
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# codex local\n");
+    expect(await readFile(path.join(home, ".config", "opencode", "AGENTS.md"), "utf8")).toBe("# global\n");
+
+    // Per-target journal states: only the failing target is ROLLBACK_FAILED.
+    const recovery = await service.recoveryStatus();
+    const batch = recovery.batches.find((entry) => entry.batchId === applied.batchId);
+    expect(batch?.status).toBe("RECOVERY_REQUIRED");
+    const states = new Map(batch?.targets.map((entry) => [entry.targetKey, entry.state]));
+    expect([...states.values()].filter((state) => state === "ROLLBACK_FAILED")).toHaveLength(1);
+  }, 90_000);
+
   it("scans a harness root without following symlinks and marks unmanaged files", async () => {
     const { repo, home, service } = await createService([codexRegistration]);
     await service.openRepositoryFromDirectory(repo);

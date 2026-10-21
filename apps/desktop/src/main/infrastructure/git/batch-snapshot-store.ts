@@ -16,8 +16,10 @@
 // - Target roots are stored absolute and never leave Main (no DTO exposes them).
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
+
+import { writeFileDurably } from "../durable-write";
 
 export interface SnapshotFileRecord {
   /** Path relative to the target root. */
@@ -83,7 +85,11 @@ export class BatchSnapshotStore {
     for (const file of input.files) {
       const blobFile = `files/${index}.bin`;
       index += 1;
-      await writeFile(path.join(directory, blobFile), file.previousContent ?? new Uint8Array());
+      // Durable: a zero-filled or truncated blob would make rollback unable to
+      // prove the pre-apply bytes after a power loss.
+      await writeFileDurably(path.join(directory, blobFile), file.previousContent ?? new Uint8Array(), {
+        mode: 0o600
+      });
       files.push({
         relativePath: file.relativePath,
         existedBefore: file.existedBefore,
@@ -102,7 +108,7 @@ export class BatchSnapshotStore {
         { targetKey: input.targetKey, targetRoot: input.targetRoot, files }
       ]
     };
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await writeFileDurably(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   }
 
   async load(batchId: string): Promise<BatchSnapshotManifest | null> {

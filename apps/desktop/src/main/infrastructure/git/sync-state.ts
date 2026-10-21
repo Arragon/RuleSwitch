@@ -4,8 +4,9 @@
 // envelopes with atomic writes. Baselines only ever advance through
 // core's baselineOutcome gate (verify + completion required).
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile, rename } from "node:fs/promises";
+
+import { writeFileDurably } from "../durable-write";
 
 import {
   baselineOutcome,
@@ -80,23 +81,18 @@ export class VersionedSyncStore<T extends object> {
     if (this.data === null) {
       return;
     }
-    await mkdir(path.dirname(this.storePath), { recursive: true });
     const envelope = {
       store: this.storeName,
       version: 1,
       writtenAt: new Date().toISOString(),
       data: this.data
     };
-    const temporaryPath = `${this.storePath}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile(temporaryPath, `${JSON.stringify(envelope, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    try {
-      await rename(temporaryPath, this.storePath);
-    } catch (error) {
-      await rename
-        .call(null, temporaryPath, `${this.storePath}.lost-${Date.now()}`)
-        .catch(() => undefined);
-      throw error;
-    }
+    // Durable atomic write: fsynced bytes, then rename, then directory flush.
+    // A crash can otherwise leave a renamed journal backed by unwritten
+    // blocks, which the recovery surface would read as truth.
+    await writeFileDurably(this.storePath, `${JSON.stringify(envelope, null, 2)}\n`, {
+      mode: 0o600
+    });
   }
 }
 

@@ -1650,10 +1650,28 @@ export class CapabilityServiceV2 {
 
     let restored = 0;
     let failed = 0;
+    // Per-target accounting: one target's failure must not relabel a sibling
+    // that restored cleanly (INH-1820 rollback-itself failure).
+    const targetFailures = new Map<string, number>();
+    const targetRestores = new Map<string, number>();
+    const bump = (map: Map<string, number>, key: string): void => {
+      map.set(key, (map.get(key) ?? 0) + 1);
+    };
+    let divergedCount = 0;
+    let snapshotPayloadsMissing = 0;
+    let writeFailures = 0;
+
     for (const target of manifest.targets) {
       for (const file of target.files) {
-        if (!isSafeRelativePath(file.relativePath)) {
+        const failRestore = (kind: "diverged" | "payload" | "write"): void => {
           failed += 1;
+          bump(targetFailures, target.targetKey);
+          if (kind === "diverged") divergedCount += 1;
+          else if (kind === "payload") snapshotPayloadsMissing += 1;
+          else writeFailures += 1;
+        };
+        if (!isSafeRelativePath(file.relativePath)) {
+          failRestore("payload");
           continue;
         }
         const absolute = path.join(target.targetRoot, file.relativePath);
@@ -1669,6 +1687,7 @@ export class CapabilityServiceV2 {
           // already in its pre-apply state, so this counts as restored
           // instead of a divergence failure.
           restored += 1;
+          bump(targetRestores, target.targetKey);
           continue;
         }
         if (currentDigest !== null && currentDigest === file.previousDigest) {
@@ -1676,32 +1695,48 @@ export class CapabilityServiceV2 {
           // before the write): the bytes already equal the pre-apply state,
           // so restoring is a no-op, not a divergence.
           restored += 1;
+          bump(targetRestores, target.targetKey);
           continue;
         }
         if (currentDigest !== file.appliedDigest) {
           // Diverged since apply: never clobber a later edit.
-          failed += 1;
+          failRestore("diverged");
           continue;
         }
         if (file.existedBefore) {
           const blob = await store.readBlob(batchId, file.blobFile);
-          if (blob === null) {
-            failed += 1;
+          // Integrity before impact: a missing or corrupt payload must never
+          // be written over the target — the target would end up holding
+          // bytes nobody can vouch for.
+          if (blob === null || file.previousDigest === null || digestBytes(blob) !== file.previousDigest) {
+            failRestore("payload");
             continue;
           }
-          await mkdir(path.dirname(absolute), { recursive: true });
-          const temporaryPath = `${absolute}.ruleswitch-restore-${process.pid}-${Date.now()}`;
-          await writeFile(temporaryPath, blob);
-          await rename(temporaryPath, absolute);
-          const verified = new Uint8Array(await readFile(absolute));
-          if (digestBytes(verified) === file.previousDigest) {
-            restored += 1;
-          } else {
-            failed += 1;
+          try {
+            await mkdir(path.dirname(absolute), { recursive: true });
+            const temporaryPath = `${absolute}.ruleswitch-restore-${process.pid}-${Date.now()}`;
+            await writeFile(temporaryPath, blob);
+            await rename(temporaryPath, absolute);
+            const verified = new Uint8Array(await readFile(absolute));
+            if (digestBytes(verified) === file.previousDigest) {
+              restored += 1;
+              bump(targetRestores, target.targetKey);
+            } else {
+              failRestore("write");
+            }
+          } catch {
+            // A filesystem error during restore (EACCES, ENOSPC, …) is a
+            // rollback failure, not an exception the caller has to catch.
+            failRestore("write");
           }
         } else {
-          await rm(absolute, { force: true });
-          restored += 1;
+          try {
+            await rm(absolute, { force: true });
+            restored += 1;
+            bump(targetRestores, target.targetKey);
+          } catch {
+            failRestore("write");
+          }
         }
       }
     }
@@ -1711,11 +1746,21 @@ export class CapabilityServiceV2 {
       current.status = status;
       current.updatedAt = new Date().toISOString();
       for (const entry of current.entries) {
-        if (entry.state === "COMMITTED") {
-          entry.state = failed === 0 ? "ROLLED_BACK" : "ROLLBACK_FAILED";
-          entry.failureDetail =
-            failed === 0 ? null : "rollback could not verify every file; inspect before continuing";
+        if (entry.state !== "COMMITTED") {
+          continue;
         }
+        const failedHere = targetFailures.get(entry.targetKey) ?? 0;
+        const restoredHere = targetRestores.get(entry.targetKey) ?? 0;
+        if (failedHere === 0 && restoredHere > 0) {
+          entry.state = "ROLLED_BACK";
+          entry.failureDetail = null;
+        } else if (failedHere > 0) {
+          entry.state = "ROLLBACK_FAILED";
+          entry.failureDetail = `rollback could not restore or verify ${failedHere} file(s); inspect before continuing`;
+        }
+        // A committed entry with neither a restore nor a failure has no
+        // snapshot file recorded: leave it COMMITTED rather than claim a
+        // rollback that never happened.
       }
     });
 
@@ -1723,12 +1768,15 @@ export class CapabilityServiceV2 {
       await store.remove(batchId);
     }
 
+    const reasons: string[] = [];
+    if (divergedCount > 0) reasons.push(`${divergedCount} file(s) changed after apply`);
+    if (snapshotPayloadsMissing > 0)
+      reasons.push(`${snapshotPayloadsMissing} snapshot payload(s) missing or failed integrity`);
+    if (writeFailures > 0) reasons.push(`${writeFailures} write/verify failure(s)`);
+
     return {
       ok: failed === 0,
-      reason:
-        failed === 0
-          ? null
-          : `${failed} file(s) were not restored (changed after apply or missing snapshot bytes)`,
+      reason: failed === 0 ? null : `${failed} file(s) were not restored: ${reasons.join("; ")}`,
       restored,
       failed,
       status: updated?.status ?? status
