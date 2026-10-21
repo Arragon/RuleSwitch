@@ -40,6 +40,7 @@ export const IPC_V2_METHODS = [
   "harnesses.list",
   "history.operations",
   "history.recovery",
+  "operations.rollback",
   "settings.get",
   "settings.setTheme",
   "apply.preview",
@@ -71,6 +72,7 @@ export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "harnesses.list": "ruleswitch:v2:harnesses:list",
   "history.operations": "ruleswitch:v2:history:operations",
   "history.recovery": "ruleswitch:v2:history:recovery",
+  "operations.rollback": "ruleswitch:v2:operations:rollback",
   "settings.get": "ruleswitch:v2:settings:get",
   "settings.setTheme": "ruleswitch:v2:settings:set-theme",
   "apply.preview": "ruleswitch:v2:operations:preview-apply",
@@ -167,6 +169,15 @@ export interface ApplyPreviewEntry {
   readonly requiresConfirmation: boolean;
 }
 
+/** Result of restoring a finished batch from its persisted snapshot. */
+export interface RollbackOutcome {
+  readonly ok: boolean;
+  readonly reason: string | null;
+  readonly restored: number;
+  readonly failed: number;
+  readonly status: string;
+}
+
 /**
  * Read-only plan. `planRevision` is echoed back on apply; a mismatch means
  * the repository, targets or consent changed since preview and the apply is
@@ -247,6 +258,7 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   "harnesses.list": emptyRequestSchema,
   "history.operations": emptyRequestSchema,
   "history.recovery": emptyRequestSchema,
+  "operations.rollback": z.strictObject({ batchId: z.string().trim().min(1) }),
   "settings.get": emptyRequestSchema,
   "settings.setTheme": setThemeRequestSchema,
   "apply.preview": applyRequestSchema,
@@ -339,6 +351,11 @@ export interface DesktopApiV2 {
   operationHistory(): Promise<readonly OperationHistoryDto[]>;
   /** Batches that need operator attention, with honest rollback availability. */
   recoveryStatus(): Promise<RecoveryReadModel>;
+  /**
+   * Restores the pre-apply bytes of a finished batch. Refuses when a target
+   * diverged after apply (the file is reported, not overwritten).
+   */
+  rollbackBatch(batchId: string): Promise<RollbackOutcome>;
   getSettings(): Promise<SettingsReadModel>;
   setTheme(theme: "light" | "dark" | "system"): Promise<SettingsReadModel>;
   previewApply(
@@ -378,6 +395,7 @@ export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Obj
   "harnesses.list": "listHarnesses",
   "history.operations": "operationHistory",
   "history.recovery": "recoveryStatus",
+  "operations.rollback": "rollbackBatch",
   "settings.get": "getSettings",
   "settings.setTheme": "setTheme",
   "apply.preview": "previewApply",

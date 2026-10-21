@@ -111,6 +111,10 @@ export function registerV2IpcHandlers(
     "harnesses.list": async () => capabilities.listHarnesses(),
     "history.operations": async () => capabilities.operationHistory(),
     "history.recovery": async () => capabilities.recoveryStatus(),
+    "operations.rollback": async (request) => {
+      const { batchId } = request as { batchId: string };
+      return capabilities.rollbackBatch(batchId);
+    },
     "settings.get": async () => capabilities.getSettings(),
     "settings.setTheme": async (request) => {
       const { theme } = request as { theme: "light" | "dark" | "system" };

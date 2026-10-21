@@ -177,6 +177,10 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["history.operations"], {})) as Awaited<
       ReturnType<DesktopApiV2["operationHistory"]>
     >,
+  rollbackBatch: async (batchId: string) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["operations.rollback"], { batchId })
+    ) as Awaited<ReturnType<DesktopApiV2["rollbackBatch"]>>,
   recoveryStatus: async () =>
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["history.recovery"], {})) as Awaited<
       ReturnType<DesktopApiV2["recoveryStatus"]>

@@ -4,7 +4,7 @@
 // read goes through fresh GitPort/scanner reads.
 
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -19,6 +19,7 @@ import type {
   ProjectDto,
   RecoveryReadModel,
   RepositoryCloneOutcome,
+  RollbackOutcome,
   RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
@@ -54,6 +55,7 @@ import {
 import type { GitPortAdapter } from "../infrastructure/git/git-port-adapter";
 import type { ProjectsStore, SettingsStore } from "../infrastructure/git/binding-store";
 import type { SyncBaselineStore } from "../infrastructure/git/baseline-store";
+import type { BatchSnapshotStore } from "../infrastructure/git/batch-snapshot-store";
 import type { OperationsStore } from "../infrastructure/git/sync-state";
 import { applyRenderedTargets } from "../infrastructure/harness/skill-slice";
 
@@ -67,6 +69,8 @@ export interface CapabilityV2Options {
    * assuming none — repeat applies become noop rather than needs-adoption.
    */
   readonly baselineStore?: SyncBaselineStore;
+  /** Persists pre-apply bytes so a finished batch can be rolled back. */
+  readonly snapshotStore?: BatchSnapshotStore;
   readonly harnessRegistry?: {
     listRegistrations(): readonly {
       harnessInstanceId: string;
@@ -601,6 +605,7 @@ export class CapabilityServiceV2 {
    * a "restore" button would be a lie. Guidance points at Git instead.
    */
   async recoveryStatus(): Promise<RecoveryReadModel> {
+    const snapshotStore = this.options.snapshotStore;
     const batches = this.options.operationsStore.listAllBatches().filter(
       (journal) =>
         journal.status !== "ALL_COMMITTED" ||
@@ -612,8 +617,14 @@ export class CapabilityServiceV2 {
             entry.state === "ROLLBACK_FAILED"
         )
     );
+    const withAvailability = await Promise.all(
+      batches.map(async (journal) => {
+        const snapshot = snapshotStore === undefined ? null : await snapshotStore.load(journal.batchId);
+        return { journal, snapshotAvailable: snapshot !== null };
+      })
+    );
     return {
-      batches: batches.map((journal) => ({
+      batches: withAvailability.map(({ journal, snapshotAvailable }) => ({
         batchId: journal.batchId,
         planId: journal.planId,
         status: journal.status,
@@ -627,9 +638,18 @@ export class CapabilityServiceV2 {
             state: entry.state,
             detail: entry.failureDetail
           })),
-        rollbackAvailable: false,
+        rollbackAvailable:
+          snapshotAvailable &&
+          journal.status !== "ROLLED_BACK" &&
+          journal.status !== "RUNNING",
         rollbackReason:
-          "pre-apply snapshot payloads are not persisted in this version, so automated rollback cannot be offered",
+          journal.status === "ROLLED_BACK"
+            ? "该批次已回滚"
+            : journal.status === "RUNNING"
+              ? "批次仍在执行，不能回滚"
+              : snapshotAvailable
+                ? null
+                : "该批次没有记录 apply 前快照（早于快照持久化），无法自动回滚",
         guidance:
           journal.status === "RECOVERY_REQUIRED"
             ? "该批次无法自证回滚。请用 Git 恢复受影响文件，确认真实状态后再重新应用。"
@@ -985,6 +1005,13 @@ export class CapabilityServiceV2 {
           repositoryRevision: headRevision,
           batchId: journal.batchId
         });
+        await this.recordSnapshot({
+          batchId: journal.batchId,
+          targetKey: entry.targetKey,
+          targetRoot: work.target.scopeRoot,
+          files: applied.snapshot.files,
+          assets: work.kindAssets
+        });
       } else {
         // Distinguish preflight refusals from write/verify failures so the
         // recovery surface can tell the operator what actually happened.
@@ -1156,6 +1183,165 @@ export class CapabilityServiceV2 {
     planEntries.sort((left, right) => (left.targetKey < right.targetKey ? -1 : 1));
 
     return { planRevision, planEntries, entryMeta, executable, assets, targets };
+  }
+
+  /**
+   * Persists the pre-apply bytes for one target. Saved per target (not once
+   * per batch) so a crash mid-batch still leaves earlier targets restorable.
+   */
+  private async recordSnapshot(input: {
+    readonly batchId: string;
+    readonly targetKey: string;
+    readonly targetRoot: string;
+    readonly files: readonly {
+      readonly relativePath: string;
+      readonly existedBefore: boolean;
+      readonly previousContent: Uint8Array | null;
+    }[];
+    readonly assets: readonly { readonly logicalName: string; readonly content: Uint8Array }[];
+  }): Promise<void> {
+    const store = this.options.snapshotStore;
+    if (store === undefined) {
+      return;
+    }
+    const appliedByPath = new Map(input.assets.map((asset) => [asset.logicalName, asset.content]));
+    await store.save({
+      batchId: input.batchId,
+      targetKey: input.targetKey,
+      targetRoot: input.targetRoot,
+      files: input.files.map((file) => ({
+        relativePath: file.relativePath,
+        existedBefore: file.existedBefore,
+        previousContent: file.previousContent,
+        appliedContent: appliedByPath.get(file.relativePath) ?? new Uint8Array()
+      }))
+    });
+  }
+
+  /**
+   * Restores the pre-apply bytes of one finished batch.
+   *
+   * Refuses when:
+   * - the batch is unknown, still running, or already rolled back;
+   * - no snapshot was recorded (batches created before this store existed);
+   * - a target changed after apply — that file is reported as failed instead
+   *   of being clobbered, and the batch moves to RECOVERY_REQUIRED.
+   */
+  async rollbackBatch(batchId: string): Promise<RollbackOutcome> {
+    const store = this.options.snapshotStore;
+    if (store === undefined) {
+      return {
+        ok: false,
+        reason: "snapshot store is not configured",
+        restored: 0,
+        failed: 0,
+        status: "UNKNOWN"
+      };
+    }
+    const journal = this.options.operationsStore.findBatchJournal(batchId);
+    if (journal === null) {
+      return { ok: false, reason: "unknown batch", restored: 0, failed: 0, status: "UNKNOWN" };
+    }
+    if (journal.status === "RUNNING") {
+      return {
+        ok: false,
+        reason: "batch is still running; wait for it to settle before rolling back",
+        restored: 0,
+        failed: 0,
+        status: journal.status
+      };
+    }
+    if (journal.status === "ROLLED_BACK") {
+      return {
+        ok: false,
+        reason: "batch is already rolled back",
+        restored: 0,
+        failed: 0,
+        status: journal.status
+      };
+    }
+    const manifest = await store.load(batchId);
+    if (manifest === null) {
+      return {
+        ok: false,
+        reason: "no snapshot was recorded for this batch, so it cannot be restored",
+        restored: 0,
+        failed: 0,
+        status: journal.status
+      };
+    }
+
+    let restored = 0;
+    let failed = 0;
+    for (const target of manifest.targets) {
+      for (const file of target.files) {
+        if (!isSafeRelativePath(file.relativePath)) {
+          failed += 1;
+          continue;
+        }
+        const absolute = path.join(target.targetRoot, file.relativePath);
+        let current: Uint8Array | null = null;
+        try {
+          current = new Uint8Array(await readFile(absolute));
+        } catch {
+          current = null;
+        }
+        const currentDigest = current === null ? null : digestBytes(current);
+        if (currentDigest !== file.appliedDigest) {
+          // Diverged since apply: never clobber a later edit.
+          failed += 1;
+          continue;
+        }
+        if (file.existedBefore) {
+          const blob = await store.readBlob(batchId, file.blobFile);
+          if (blob === null) {
+            failed += 1;
+            continue;
+          }
+          await mkdir(path.dirname(absolute), { recursive: true });
+          const temporaryPath = `${absolute}.ruleswitch-restore-${process.pid}-${Date.now()}`;
+          await writeFile(temporaryPath, blob);
+          await rename(temporaryPath, absolute);
+          const verified = new Uint8Array(await readFile(absolute));
+          if (digestBytes(verified) === file.previousDigest) {
+            restored += 1;
+          } else {
+            failed += 1;
+          }
+        } else {
+          await rm(absolute, { force: true });
+          restored += 1;
+        }
+      }
+    }
+
+    const status = failed === 0 ? "ROLLED_BACK" : "RECOVERY_REQUIRED";
+    const updated = await this.options.operationsStore.updateBatchJournal(batchId, (current) => {
+      current.status = status;
+      current.updatedAt = new Date().toISOString();
+      for (const entry of current.entries) {
+        if (entry.state === "COMMITTED") {
+          entry.state = failed === 0 ? "ROLLED_BACK" : "ROLLBACK_FAILED";
+          entry.failureDetail =
+            failed === 0 ? null : "rollback could not verify every file; inspect before continuing";
+        }
+      }
+    });
+
+    if (failed === 0) {
+      await store.remove(batchId);
+    }
+
+    return {
+      ok: failed === 0,
+      reason:
+        failed === 0
+          ? null
+          : `${failed} file(s) were not restored (changed after apply or missing snapshot bytes)`,
+      restored,
+      failed,
+      status: updated?.status ?? status
+    };
   }
 
   /** Current HEAD revision of the open repository (empty string when unknown). */
@@ -1374,6 +1560,23 @@ interface ResolvedApplyTarget {
   readonly scope: ApplyTargetInput["scope"];
   readonly scopeRoot: string | null;
   readonly blockedReason: string | null;
+}
+
+/**
+ * Rejects any relative path that could escape the target root. Snapshot
+ * manifests are on disk and therefore untrusted input.
+ */
+function isSafeRelativePath(relativePath: string): boolean {
+  return (
+    relativePath.length > 0 &&
+    !relativePath.includes("\0") &&
+    !relativePath.includes("\\") &&
+    !relativePath.startsWith("/") &&
+    !/^[A-Za-z]:/.test(relativePath) &&
+    relativePath
+      .split("/")
+      .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  );
 }
 
 function applyEntryKey(target: ResolvedApplyTarget, kind: AssetKind): string {

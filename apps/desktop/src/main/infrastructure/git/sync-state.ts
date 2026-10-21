@@ -199,6 +199,22 @@ export class OperationsStore extends VersionedSyncStore<OperationsData> {
     });
   }
 
+  /** Mutates and persists one journal (rollback bookkeeping). */
+  async updateBatchJournal(
+    batchId: string,
+    mutate: (journal: BatchJournal) => void
+  ): Promise<BatchJournal | null> {
+    const existing = this.current().batchJournals[batchId];
+    if (existing === undefined) {
+      return null;
+    }
+    mutate(existing);
+    await this.mutate((data) => {
+      data.batchJournals[batchId] = existing;
+    });
+    return existing;
+  }
+
   findBatchJournal(batchId: string): BatchJournal | null {
     return this.current().batchJournals[batchId] ?? null;
   }

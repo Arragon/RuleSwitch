@@ -1336,6 +1336,42 @@ export function AppV2({ api }: AppV2Props) {
                         自动回滚：{batch.rollbackAvailable ? "可用" : "不可用"}
                         {batch.rollbackReason !== null ? `（${batch.rollbackReason}）` : ""}
                       </p>
+                      {batch.rollbackAvailable && (
+                        <div className="app-v2-actions">
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => {
+                              setDialog({
+                                title: `回滚批次 ${batch.batchId}？`,
+                                message:
+                                  "将把该批次写过的文件恢复成 apply 之前的字节；apply 之后又被修改的文件会被跳过并标记为需要人工处理。",
+                                confirmLabel: "回滚",
+                                tone: "danger",
+                                onConfirm: async () => {
+                                  setDialog(null);
+                                  await safeRun(async () => {
+                                    const outcome = await api.rollbackBatch(batch.batchId);
+                                    if (!outcome.ok) {
+                                      setError(
+                                        `${outcome.reason ?? "回滚未完成"}（已恢复 ${outcome.restored}，失败 ${outcome.failed}）`
+                                      );
+                                    } else {
+                                      setMessage(
+                                        `已回滚 ${outcome.restored} 个文件（批次状态 ${outcome.status}）`
+                                      );
+                                    }
+                                    setOperations(await api.operationHistory());
+                                    setRecovery(await api.recoveryStatus());
+                                  });
+                                }
+                              });
+                            }}
+                          >
+                            回滚该批次
+                          </button>
+                        </div>
+                      )}
                       <ul>
                         {batch.targets.map((target) => (
                           <li key={target.targetKey}>
