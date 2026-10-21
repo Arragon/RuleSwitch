@@ -211,3 +211,18 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 **落盘持久性**：新增 `infrastructure/durable-write.ts` 的 `writeFileDurably()` —— 写临时文件 → `fsync` → `rename` → 目录 `fsync`（目录打开失败则跳过，文件本身已 sync）。journal/baseline/settings 存储与批次快照的 blob、manifest 全部改走它。原因：temp+rename 只保证「读者看不到半截文件」，不保证「rename 可见时数据块已落盘」；断电窗口内 recovery 可能读到不可信的 journal 或全零 blob。
 
 **证据边界（不夸大）**：进程级 SIGKILL 不会丢 page cache，因此 fsync 的断电语义在本环境**无法被测试证明**。`durable-write.unit.test.ts` 只证明可观察的性质：字节精确、原子替换、无临时残留、失败不破坏原文件、符号链接目标不被跟随。断电持久性属设计层保证，需真机断电/CI VM 才能取证。
+
+### 21. 库内应用的空 payload 契约与业务级 E2E（2026-10-21 round 8）
+
+**`contentBase64: ""` 是合法请求，不是缺失字段**。配置库的应用路径不把文件字节塞进 IPC：Main 的 `resolveApplyAssetBytes` 对 `content.byteLength === 0` 的资产按 `(logicalName, kind)` 从**已打开的仓库**解析真实字节；非空值才作为覆盖内容使用。原 schema 写成 `z.string().min(1)`，与实现直接矛盾，后果是**库内预览/查看差异/应用在真实应用中 100% 失败**（`Too small: expected string to have >=1 characters`），而 334 条单测全绿——它们直接调用服务、绕过了 IPC 边界。
+
+契约现状：`assetKey` / `kind` / `logicalName` 保持 `.min(1)`（身份必须可解析），`contentBase64` 允许为空并注明语义。回归见 `packages/core/src/v2/__tests__/ipc-v2-schema.unit.test.ts`（6 条）。
+
+**业务级 E2E**（`tests/e2e/apply-flow.e2e.spec.ts`）建立了从 UI 到磁盘的完整证据链：连接仓库 → 配置库列出资产 → 选目标 harness → 预览 → 查看行级差异（此时目标仍未创建）→ 确认应用 → 断言 harness 根下的字节。两个接缝让环境自包含且不污染本机：
+
+- `HOME` — harness 根目录按 `process.env.HOME` 解析（`capabilities-v2` 的 `scopeRoot`）；
+- `--user-data-dir` — Electron 的 `app.getPath("userData")`，即 v2 各存储（harness 注册表、identity、journal、快照）所在目录。
+
+harness 注册以存储自身的信封格式种入，因此不依赖真机安装任何 AI 工具；这也让 E2E 能在 CI 与开发机上得到同一结果。
+
+**教训（写进流程）**：只测服务层无法证明主路径可用。任何触及 IPC 请求/响应形状的改动，必须同时有（a）边界 schema 用例、（b）真实 UI 可达性用例。
