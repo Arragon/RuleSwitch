@@ -232,7 +232,14 @@ const applyAssetRequestSchema = z.array(
     assetKey: z.string().min(1),
     kind: z.string().min(1),
     logicalName: z.string().min(1),
-    contentBase64: z.string().min(1)
+    /**
+     * Optional payload override. An EMPTY string is meaningful: Main resolves
+     * the bytes from the open repository by (logicalName, kind), which is what
+     * the library surface does — it never ships file bytes through IPC just to
+     * apply what is already in the repo. A non-empty value wins and is used
+     * verbatim (draft/ad-hoc content).
+     */
+    contentBase64: z.string()
   })
 ).min(1);
 
