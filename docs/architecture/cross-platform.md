@@ -60,3 +60,12 @@ watch event → debounce/invalidate → stat/read/hash → state update
 - Windows/macOS/Linux native Electron, filesystem, packaging smoke。
 
 `apps/desktop/electron-builder.yml` 仅预留 NSIS、DMG/ZIP、AppImage/deb；electron-builder dependency 未启用，packaging/signing/CI 没有执行或平台证据。
+
+## M9/M10 准备（2026-10-21，无 native runner）
+
+在拿到 Windows/Linux 真机之前，先把**与平台无关即可验证**的部分固化成测试，避免"我机器上能跑"被误当作 containment 规则：
+
+- `apps/desktop/src/main/infrastructure/path-safety.ts` 是 Main 侧唯一的相对路径守卫（`capabilities-v2` 已改为复用它），拒绝：空路径、NUL、反斜杠、`/`/盘符开头、`..`/`.` 段、`//`、**Windows 保留设备名**（`NUL`、`CON`、`COM1-9`、`LPT1-9`，含带扩展名形式）、**尾随点/空格**（Windows 会静默改写）。
+- `collidesCaseInsensitively()` 报告在 Windows 与默认 macOS 上会被合并的大小写冲突：发现冲突必须上报，不能替用户挑一个。
+- 上述均已在 `path-safety.unit.test.ts`（10 例）用 Windows 形状输入验证；这些断言在任何平台上跑都是同一个结果。
+- 仍未验证（必须 native runner）：rename-over-existing、文件权限/locking、长路径、UNC、跨设备、以及 Windows 上的真实 crash durability。进程级崩溃矩阵目前只在 macOS 跑过。

@@ -60,6 +60,7 @@ import type { ProjectsStore, SettingsStore } from "../infrastructure/git/binding
 import type { SyncBaselineStore } from "../infrastructure/git/baseline-store";
 import type { BatchSnapshotStore, BatchSnapshotManifest } from "../infrastructure/git/batch-snapshot-store";
 import type { OperationsStore } from "../infrastructure/git/sync-state";
+import { isSafeRelativePath } from "../infrastructure/path-safety";
 import { applyRenderedTargets } from "../infrastructure/harness/skill-slice";
 
 export interface CapabilityV2Options {
@@ -1918,23 +1919,6 @@ interface ResolvedApplyTarget {
   readonly scope: ApplyTargetInput["scope"];
   readonly scopeRoot: string | null;
   readonly blockedReason: string | null;
-}
-
-/**
- * Rejects any relative path that could escape the target root. Snapshot
- * manifests are on disk and therefore untrusted input.
- */
-function isSafeRelativePath(relativePath: string): boolean {
-  return (
-    relativePath.length > 0 &&
-    !relativePath.includes("\0") &&
-    !relativePath.includes("\\") &&
-    !relativePath.startsWith("/") &&
-    !/^[A-Za-z]:/.test(relativePath) &&
-    relativePath
-      .split("/")
-      .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
-  );
 }
 
 function applyEntryKey(target: ResolvedApplyTarget, kind: AssetKind): string {
