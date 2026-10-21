@@ -57,3 +57,9 @@
 - 默认 npmmirror audit endpoint 在当前环境不存在；使用 `corepack pnpm audit --prod --registry=https://registry.npmjs.org`，当前结果无 known vulnerabilities。
 - `pnpm allowBuilds` 只显式保留 `electron`、`esbuild`、`tldjs`：分别为 Electron 安装、Vite/provider build、Rulesync transitive 安装所必需。不要静默放宽。
 - esbuild 0.27.7（MIT，2026-04-02 发布）是 build tooling，不是 shipped runtime。Packaging 尚未运行；后续阶段仍需显式审查批准所需脚本或选替代方案。
+
+## Packaging (M8)
+
+- `apps/desktop/electron-builder.yml` 已能通过 electron-builder 26.15.3 的配置解析、`@electron/rebuild`、Electron 43.4.1 下载与 staging；`pack:dir` / `pack:mac` 脚本已加入。
+- 在受限（嵌套沙箱）环境里打包会在解压 Electron zip 时失败：`Brokered file token refused: modify backup failed`（createWriteStream 被 FS shim 拒绝）。这是环境限制，不是配置错误；正常终端或 CI 无此问题，也不应把 `--no-sandbox` 之类运行时参数写进打包配置。
+- 未签名本地验证用 `CSC_IDENTITY_AUTO_DISCOVERY=false`；正式签名需要 Apple Developer 证书与 notarization 凭据，M8 剩余项。

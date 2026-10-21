@@ -118,3 +118,35 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 - `repository.clone({remoteUrl, targetDirectory})`：目标目录必须不存在，克隆后校验 `ruleswitch.yaml` 是否存在（`manifestPresent`）；凭据完全交给系统 Git，应用不接触凭据。
 - 仍无通用 fs/shell/path 能力；所有新通道使用 opaque ID 或逻辑名，绝对路径只在 Main 内部使用。
 - 新增 store 文件 `v2/sync-baselines-v1.json`；删除后可从 Git 重新 bootstrap。
+
+---
+
+## 补记（2026-10-21）：批量快照/回滚、本机扫描、逐项同步
+
+### 12. `ruleswitch:v2:operations:rollback`（`rollbackBatch`）
+
+- `BatchSnapshotStore` 在 apply 每个目标成功后立即落盘该目标 apply 前的字节（`v2/batch-snapshots/<batchId>/`），因此进程中途退出仍可恢复已提交的目标。
+- 回滚语义：**逐字节恢复**；apply 前不存在的文件则删除。若某文件在 apply 之后又被改动（当前摘要 ≠ 记录的 appliedDigest），该文件被记为失败而**不覆盖用户新内容**，批次转 `RECOVERY_REQUIRED`。
+- kind 边界：快照 blob 只接受 `files/<n>.bin`，加载时复验；manifest 中的相对路径再过 `isSafeRelativePath`，拒绝 `..`、绝对路径、盘符、反斜杠。
+- `rollbackAvailable` 由「磁盘上是否真有快照 + 批次状态」推导，不再是常量 false。
+
+### 13. `ruleswitch:v2:harnesses:scan`（`scanHarness`）
+
+- 有界遍历：最多 2000 文件、深度 6；**跳过符号链接**（不跟随）。
+- 只返回相对路径；`managed` 仅在 `SyncBaseline` 能证明 RuleSwitch 写过该路径时为 true。
+- 分类基于跨适配器成立的布局约定（`skills/`、`prompts/`、`rules/`、根级 `AGENTS.md` 等），不认识的一律 `kind: null`，不猜。
+
+### 14. `HarnessChangeDto` 增加双边路径
+
+- 新增 `sourceAssetKey` / `targetAssetKey`（repo-relative，可为 null 或“目标尚不存在的目标位置”）。
+- 目的：逐项处理由 Renderer 复用 `readRepoFile` + `editRepoFile` 完成，**不新增写通道**，也不让 Renderer 组装路径。
+- 同时修正 `setCompare` 的摘要口径：源侧原本走 `Buffer.toString("binary")` 再哈希，目标侧用 `contentDigest`，两侧永不可能相等；现统一为 `contentDigest`。
+
+### 15. `editRepoFile` 创建父目录
+
+- 提升 source-only 资产需要在 `global/native/<adapter>/...` 下新建文件；在 `safeRepoPath` 已经完成 containment 校验后 `mkdir -p`。
+
+### 影响
+
+- `IPC_V2_METHODS` 增至 **29**；`assertV2Surface` 期望值同步。
+- 仍无通用 fs/shell/path 能力。

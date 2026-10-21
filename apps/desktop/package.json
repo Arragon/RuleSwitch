@@ -10,7 +10,9 @@
     "pack:win": "set \"PATH=D:\\Project\\RuleSwitch\\tools;%PATH%\" && electron-builder --win",
     "pack:portable": "set \"PATH=D:\\Project\\RuleSwitch\\tools;%PATH%\" && electron-builder --win portable",
     "typecheck": "corepack pnpm --filter @ruleswitch/core run build && corepack pnpm --filter @ruleswitch/rulesync-provider run build && corepack pnpm --filter @ruleswitch/ui run build && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "pack:dir": "electron-vite build && electron-builder --dir",
+    "pack:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
     "@ruleswitch/core": "workspace:*",
@@ -31,5 +33,7 @@
     "electron-vite": "5.0.0",
     "typescript": "5.9.3",
     "vite": "catalog:"
-  }
+  },
+  "description": "RuleSwitch — Personal Agent Environment as Code: sync AI harness configuration through a Git repository.",
+  "author": "RuleSwitch"
 }

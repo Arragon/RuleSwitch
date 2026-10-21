@@ -22,11 +22,11 @@
 
 - v1.0 主线（M0–M6）已实现并在 macOS 验证：v2 contracts、GitPort + 稳定身份、Config Repo layout / Asset Graph、One-Skill 与 Project AGENTS 双向纵切、B/L/D reconcile + journaled batch apply、配置类型扩展、四 Harness（Claude Code / Codex / Cursor / OpenCode）adapter 与 conformance。
 - M7 产品 UI 进行中：`packages/ui/src/app-v2.tsx` 为七页 shell（Overview / 配置库 / 本机 AI 工具 / 项目 / 同步变更 / 历史 / 设置），消费只读 v2 read model；Phase A v1 workbench 在兼容窗口内保留（`RULESWITCH_SMOKE_WORKSPACE` 触发 v1 smoke 渲染）。
-- 2026-10-20 macOS 实测（Electron 43.4.1）：typecheck 4 workspace 通过；lint 0 error；unit 274；integration 69（真实 bare remote、FF-only、remote race、Index 三版本 diff、discard 备份）；E2E 8（v2 shell 7 + Phase A walking skeleton 1）。
+- 2026-10-20 macOS 实测（Electron 43.4.1）：typecheck 4 workspace 通过；lint 0 error；unit 286；integration 69（真实 bare remote、FF-only、remote race、Index 三版本 diff、discard 备份）；E2E 8（v2 shell 7 + Phase A walking skeleton 1）。
 - Phase A 原始证据为 Windows（Node 22.18.0 / Electron 43.4.1）；macOS 已由上述 run 覆盖；Linux 未测试。fixtures/abstraction 不能代替 native runner。
-- 协议变更见 ADR-0009（read-file / apply targets / adoption / preview / validate / project binding / recovery）；`IPC_V2_METHODS` 现为 27。
+- 协议变更见 ADR-0009（read-file / apply targets / adoption / preview / validate / project binding / recovery）；`IPC_V2_METHODS` 现为 29。
 - `hasOwnership` 已接 `SyncBaselineStore`（`v2/sync-baselines-v1.json`）：重复应用为 `noop`，本机改动后再应用被拒为 `UNMANAGED_TARGET_CHANGED`。
-- Recovery Center 只做诊断：apply 前的 snapshot payload 尚未持久化，因此 `rollbackAvailable` 恒 false 且给出原因，不得在 UI 假装可回滚。
+- apply 前字节由 `BatchSnapshotStore`（`v2/batch-snapshots/`）持久化，`rollbackBatch` 可逐字节恢复；apply 后被改动的文件会被拒绝覆盖并让批次转 `RECOVERY_REQUIRED`。`rollbackAvailable` 由真实快照推导。
 - M7 未完成面：onboarding 仍无 clone 与 credential 交互；统一 Preview 已有（previewApply + Monaco Diff 尚未接入 v2 流程）；本机工具详情仍为只读列表；仓库内逐项处理（INH-1857）仍只有 summary；项目详情已完成绑定与继承标记的基础面。M8 已开始（失败状态区分、recovery 诊断、baseline），packaging/signing/CI 与 M9/M10 未开始。
 - Workspace/repository 稳定身份已落地；跨重启 history rebind 由 v2 stores 承担，旧 unversioned ledger 只读保留。完整 crash repair UI 仍缺（manifest scan + mutation gate 已有）。
 - 构建派生陷阱：`packages/*` 与 `apps/*` 的 unit/integration 测试解析 `@ruleswitch/core` 的 **dist**，因此 `test:unit` / `test:integration` / `packages/ui` 的 `build`+`typecheck` 都先构建 core；改 core 源码后不要直接跑 vitest，否则会对着旧产物得到假结果。
