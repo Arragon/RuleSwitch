@@ -89,6 +89,7 @@ describe("CapabilityServiceV2 (M7)", () => {
       logPage: () => undefined,
       listProjects: () => undefined,
       listHarnesses: () => undefined,
+      scanHarness: () => undefined,
       operationHistory: () => undefined,
       recoveryStatus: () => undefined,
       rollbackBatch: () => undefined,
@@ -98,7 +99,7 @@ describe("CapabilityServiceV2 (M7)", () => {
       applyToHarnesses: () => undefined
     };
     expect(assertV2Surface(methods as never)).toEqual([]);
-    expect(assertV2Surface({} as never).length).toBe(28);
+    expect(assertV2Surface({} as never).length).toBe(29);
   });
 
   it("opens a repository and shapes the library read model with draft markers", async () => {

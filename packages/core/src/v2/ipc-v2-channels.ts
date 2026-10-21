@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import type {
   GitAreaReadModel,
+  HarnessScanReadModel,
   RecoveryReadModel,
   LibraryReadModel,
   OperationHistoryDto,
@@ -38,6 +39,7 @@ export const IPC_V2_METHODS = [
   "projects.bind",
   "projects.unbind",
   "harnesses.list",
+  "harnesses.scan",
   "history.operations",
   "history.recovery",
   "operations.rollback",
@@ -70,6 +72,7 @@ export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "projects.bind": "ruleswitch:v2:projects:bind",
   "projects.unbind": "ruleswitch:v2:projects:unbind",
   "harnesses.list": "ruleswitch:v2:harnesses:list",
+  "harnesses.scan": "ruleswitch:v2:harnesses:scan",
   "history.operations": "ruleswitch:v2:history:operations",
   "history.recovery": "ruleswitch:v2:history:recovery",
   "operations.rollback": "ruleswitch:v2:operations:rollback",
@@ -256,6 +259,7 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   }),
   "projects.unbind": z.strictObject({ projectId: z.string().trim().min(1) }),
   "harnesses.list": emptyRequestSchema,
+  "harnesses.scan": z.strictObject({ harnessInstanceId: z.string().trim().min(1) }),
   "history.operations": emptyRequestSchema,
   "history.recovery": emptyRequestSchema,
   "operations.rollback": z.strictObject({ batchId: z.string().trim().min(1) }),
@@ -348,6 +352,11 @@ export interface DesktopApiV2 {
   logPage(cursor: string | null, pageSize: number): Promise<{ readonly commits: readonly { revision: string; parents: readonly string[]; authorName: string; authoredAt: string; subject: string }[]; readonly nextCursor: string | null }>;
   listProjects(): Promise<readonly ProjectDto[]>;
   listHarnesses(): Promise<readonly HarnessDto[]>;
+  /**
+   * Scans one harness root for real files. Returns relative paths only, skips
+   * symlinks, and marks a file managed only when a SyncBaseline proves it.
+   */
+  scanHarness(harnessInstanceId: string): Promise<HarnessScanReadModel | null>;
   operationHistory(): Promise<readonly OperationHistoryDto[]>;
   /** Batches that need operator attention, with honest rollback availability. */
   recoveryStatus(): Promise<RecoveryReadModel>;
@@ -393,6 +402,7 @@ export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Obj
   "projects.bind": "bindProject",
   "projects.unbind": "unbindProject",
   "harnesses.list": "listHarnesses",
+  "harnesses.scan": "scanHarness",
   "history.operations": "operationHistory",
   "history.recovery": "recoveryStatus",
   "operations.rollback": "rollbackBatch",

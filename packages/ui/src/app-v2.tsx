@@ -14,6 +14,7 @@ import type {
   ProjectDto,
   RecoveryReadModel,
   HarnessDto,
+  HarnessScanReadModel,
   OperationHistoryDto,
   RepositoryValidation,
   SetCompareReadModel,
@@ -117,6 +118,7 @@ export function AppV2({ api }: AppV2Props) {
   const [harnesses, setHarnesses] = useState<readonly HarnessDto[]>([]);
   const [operations, setOperations] = useState<readonly OperationHistoryDto[]>([]);
   const [recovery, setRecovery] = useState<RecoveryReadModel | null>(null);
+  const [harnessScan, setHarnessScan] = useState<HarnessScanReadModel | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -186,6 +188,7 @@ export function AppV2({ api }: AppV2Props) {
       case "harnesses":
         return safeRun(async () => {
           setHarnesses(await api.listHarnesses());
+          setHarnessScan(null);
         });
       case "projects":
         return safeRun(async () => {
@@ -466,6 +469,34 @@ export function AppV2({ api }: AppV2Props) {
       }
       setProjects(await api.listProjects());
       setMessage(`已解除绑定 ${projectId}（配置库内容未改动）`);
+    });
+
+  const resolveCompareItem = (
+    diff: SetCompareReadModel["diffs"][number],
+    direction: "adopt-source" | "keep-target"
+  ): Promise<void> =>
+    safeRun(async () => {
+      const fromPath = direction === "adopt-source" ? diff.sourceAssetKey : diff.targetAssetKey;
+      const toPath = direction === "adopt-source" ? diff.targetAssetKey : diff.sourceAssetKey;
+      if (fromPath === null || toPath === null) {
+        setError("该条目缺少一侧的仓库路径，无法逐项处理");
+        return;
+      }
+      const file = await api.readRepoFile(fromPath);
+      if (file === null) {
+        setError("无法读取来源内容（可能已被移动或删除）");
+        return;
+      }
+      const written = await api.editRepoFile(toPath, file.contentBase64);
+      if (!written) {
+        setError("写入被拒绝（路径不在受管范围，或仓库版本已变化）");
+        return;
+      }
+      setSetCompare(await api.setCompare());
+      setGitArea(await api.gitArea());
+      setMessage(
+        `已按${direction === "adopt-source" ? "来源" : "目标"}覆盖：${diff.assetKey}（进入 Git 未暂存更改）`
+      );
     });
 
   const libraryGroups = useMemo(() => groupLibraryEntries(library?.entries ?? []), [library]);
@@ -1026,6 +1057,7 @@ export function AppV2({ api }: AppV2Props) {
                     <th scope="col">状态</th>
                     <th scope="col">全局可写类型</th>
                     <th scope="col">项目可写类型</th>
+                    <th scope="col">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1037,10 +1069,50 @@ export function AppV2({ api }: AppV2Props) {
                       <td>{harness.installed ? `已安装 · ${harness.readiness}` : "未安装"}</td>
                       <td>{harness.globalKinds.length > 0 ? harness.globalKinds.join("、") : "无"}</td>
                       <td>{harness.projectKinds.length > 0 ? harness.projectKinds.join("、") : "无"}</td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void safeRun(async () => {
+                              const scan = await api.scanHarness(harness.harnessInstanceId);
+                              setHarnessScan(scan);
+                              if (scan === null) {
+                                setError("该工具未登记，无法扫描");
+                              }
+                            })
+                          }
+                        >
+                          扫描本机
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            )}
+
+            {harnessScan !== null && (
+              <div className="app-v2-outcome" role="status" aria-label="本机扫描结果">
+                <p>
+                  {harnessScan.displayName} · 扫描于 {harnessScan.scannedAt.slice(0, 19)} ·
+                  已纳管 {harnessScan.managedCount} · 未分类 {harnessScan.unclassifiedCount}
+                  {harnessScan.truncated ? " · 结果已截断" : ""}
+                </p>
+                {!harnessScan.rootPresent ? (
+                  <p>未发现该工具的全局目录（可能尚未安装或使用自定义位置）。</p>
+                ) : harnessScan.files.length === 0 ? (
+                  <p>目录存在但没有文件。</p>
+                ) : (
+                  <ul>
+                    {harnessScan.files.map((file) => (
+                      <li key={file.relativePath}>
+                        {file.relativePath} · {file.byteLength} B ·{" "}
+                        {file.kind ?? "未分类"} · {file.managed ? "RuleSwitch 管理" : "本机自有"}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
           </section>
         )}
@@ -1276,13 +1348,54 @@ export function AppV2({ api }: AppV2Props) {
             )}
             <h2>Harness 配置</h2>
             <p>{setCompareSummary(setCompare)}</p>
-            <ul>
-              {(setCompare?.diffs ?? []).map((diff) => (
-                <li key={diff.assetKey}>
-                  {diff.assetKey} — {relationLabel(diff.relation)}
-                </li>
-              ))}
-            </ul>
+            {(setCompare?.diffs ?? []).length === 0 ? (
+              <p className="app-v2-hint">仓库内没有可比较的 Harness 配置集合。</p>
+            ) : (
+              <table className="app-v2-table">
+                <thead>
+                  <tr>
+                    <th scope="col">资产</th>
+                    <th scope="col">关系</th>
+                    <th scope="col">逐项处理</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(setCompare?.diffs ?? []).map((diff) => (
+                    <tr key={diff.assetKey}>
+                      <td>{diff.assetKey}</td>
+                      <td>{relationLabel(diff.relation)}</td>
+                      <td>
+                        {diff.relation === "identical" || diff.relation === "unsupported" ? (
+                          <span className="app-v2-hint">
+                            {diff.relation === "identical" ? "无需处理" : "该类型不支持同步"}
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              disabled={diff.sourceAssetKey === null || diff.targetAssetKey === null}
+                              onClick={() => void resolveCompareItem(diff, "adopt-source")}
+                            >
+                              采用来源
+                            </button>{" "}
+                            <button
+                              type="button"
+                              disabled={diff.sourceAssetKey === null || diff.targetAssetKey === null}
+                              onClick={() => void resolveCompareItem(diff, "keep-target")}
+                            >
+                              保留目标
+                            </button>
+                            {diff.relation === "both-modified" ? (
+                              <p className="app-v2-hint">双方都修改过，必须显式选择一侧。</p>
+                            ) : null}
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </section>
         )}
 

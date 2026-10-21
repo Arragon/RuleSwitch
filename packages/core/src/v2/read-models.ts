@@ -50,7 +50,15 @@ export interface GitAreaReadModel {
 }
 
 export interface HarnessChangeDto {
+  /** Semantic key: "<kind>|<logicalName>". */
   readonly assetKey: string;
+  /**
+   * Repository-relative path of the source side, when present. Opaque to the
+   * Renderer: it is the same `assetKey` shape accepted by readRepoFile.
+   */
+  readonly sourceAssetKey: string | null;
+  /** Repository-relative path of the target side, when present. */
+  readonly targetAssetKey: string | null;
   readonly kind: AssetKind;
   readonly relation:
     | "identical"
@@ -82,6 +90,30 @@ export interface ProjectDto {
    * an https/ssh URL that v1 patterns cannot express.
    */
   readonly remoteVerified: "matched" | "mismatch" | "unknown";
+}
+
+/** One real file found under a harness root (INH-1854). */
+export interface HarnessFileDto {
+  /** Path relative to the harness root; never absolute. */
+  readonly relativePath: string;
+  readonly byteLength: number;
+  readonly digest: string;
+  /** Classified asset kind, or null when the layout is not recognised. */
+  readonly kind: string | null;
+  /** True only when a SyncBaseline proves RuleSwitch wrote this file. */
+  readonly managed: boolean;
+}
+
+export interface HarnessScanReadModel {
+  readonly harnessInstanceId: string;
+  readonly adapterId: string;
+  readonly displayName: string;
+  readonly rootPresent: boolean;
+  readonly scannedAt: string;
+  readonly truncated: boolean;
+  readonly files: readonly HarnessFileDto[];
+  readonly managedCount: number;
+  readonly unclassifiedCount: number;
 }
 
 export interface HarnessDto {

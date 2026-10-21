@@ -4,7 +4,7 @@
 // confirmed, all registered harnesses at global scope).
 
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -520,5 +520,70 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     // so assert on the explicit snapshot-backed path instead.
     expect(applied.status).toBe("ALL_COMMITTED");
     expect(available).toBeUndefined();
+  }, 90_000);
+
+  it("scans a harness root without following symlinks and marks unmanaged files", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    // Real local layout the user might already have.
+    await mkdir(path.join(home, ".codex", "skills", "review"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# local\n", "utf8");
+    await writeFile(path.join(home, ".codex", "skills", "review", "SKILL.md"), "# skill\n", "utf8");
+    await writeFile(path.join(home, ".codex", "notes.txt"), "unrelated\n", "utf8");
+    // A symlink must be skipped, never followed.
+    await writeFile(path.join(home, "outside.txt"), "outside\n", "utf8");
+    await symlink(path.join(home, "outside.txt"), path.join(home, ".codex", "linked.txt"));
+
+    const scan = await service.scanHarness("harn_codex");
+    expect(scan?.rootPresent).toBe(true);
+    const paths = scan?.files.map((file) => file.relativePath) ?? [];
+    expect(paths).toContain("AGENTS.md");
+    expect(paths).toContain("skills/review/SKILL.md");
+    expect(paths).toContain("notes.txt");
+    expect(paths).not.toContain("linked.txt");
+    // No absolute path leaks out of the read model.
+    expect(JSON.stringify(scan)).not.toContain(home);
+
+    const byPath = new Map((scan?.files ?? []).map((file) => [file.relativePath, file]));
+    expect(byPath.get("AGENTS.md")?.kind).toBe("instructions");
+    expect(byPath.get("skills/review/SKILL.md")?.kind).toBe("skills");
+    // Unrecognised layout is reported as null, not guessed.
+    expect(byPath.get("notes.txt")?.kind).toBeNull();
+    // Nothing is managed before RuleSwitch writes anything.
+    expect(scan?.managedCount).toBe(0);
+    expect(scan?.unclassifiedCount).toBe(1);
+  }, 90_000);
+
+  it("marks a file managed only after a verified apply recorded a baseline", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# local\n", "utf8");
+
+    await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      confirmAdoption: true,
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+
+    const scan = await service.scanHarness("harn_codex");
+    const agents = scan?.files.find((file) => file.relativePath === "AGENTS.md");
+    expect(agents?.managed).toBe(true);
+    expect(scan?.managedCount).toBe(1);
+  }, 90_000);
+
+  it("reports an absent harness root and an unknown harness", async () => {
+    const { repo, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const missingRoot = await service.scanHarness("harn_codex");
+    expect(missingRoot?.rootPresent).toBe(false);
+    expect(missingRoot?.files).toHaveLength(0);
+
+    expect(await service.scanHarness("harn_unknown")).toBeNull();
   }, 90_000);
 });

@@ -109,6 +109,10 @@ export function registerV2IpcHandlers(
       return capabilities.unbindProject(projectId);
     },
     "harnesses.list": async () => capabilities.listHarnesses(),
+    "harnesses.scan": async (request) => {
+      const { harnessInstanceId } = request as { harnessInstanceId: string };
+      return capabilities.scanHarness(harnessInstanceId);
+    },
     "history.operations": async () => capabilities.operationHistory(),
     "history.recovery": async () => capabilities.recoveryStatus(),
     "operations.rollback": async (request) => {

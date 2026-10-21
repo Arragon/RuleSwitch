@@ -4,7 +4,7 @@
 // read goes through fresh GitPort/scanner reads.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -17,6 +17,8 @@ import type {
   ProjectBindRequest,
   ProjectBindingOutcome,
   ProjectDto,
+  HarnessFileDto,
+  HarnessScanReadModel,
   RecoveryReadModel,
   RepositoryCloneOutcome,
   RollbackOutcome,
@@ -25,7 +27,6 @@ import type {
   SettingsReadModel
 } from "@ruleswitch/core";
 import {
-  aggregateSkillAssets,
   buildApplyPlan,
   compareCollections,
   loadRepoInventory,
@@ -321,57 +322,66 @@ export class CapabilityServiceV2 {
       return null;
     }
     const { createFsRepoFileSource } = await import("../infrastructure/git/repo-source");
-    const currentRoot = this.options.gitPort.currentRoot();
-    const inventoryResult = await loadRepoInventory(createFsRepoFileSource(currentRoot), this.options.hasher);
+    const inventoryResult = await loadRepoInventory(
+      createFsRepoFileSource(this.options.gitPort.currentRoot()),
+      this.options.hasher
+    );
     if (!inventoryResult.ok) {
       return null;
     }
     const inventory = inventoryResult.inventory;
-    const sourceSkills = aggregateSkillAssets(
-      inventory.assets.filter((asset) => asset.kind === "skills"),
-      this.options.hasher
-    );
-    const source = {
-      label: "global-skills",
-      assets: sourceSkills.flatMap((skill) =>
-        skill.files.map((file) => ({
-          kind: "skills" as const,
-          logicalName: `${skill.skillName}/${file.relativePath}`,
-          digest: this.options.hasher.sha256Hex(
-            skill.files.find((candidate) => candidate === file) === undefined
-              ? ""
-              : Buffer.from(file.content).toString("binary")
-          )
-        }))
-      ),
-      supportedKinds: new Set(["skills"] as const)
-    };
-    const codexNative = inventory.assets.filter(
-      (asset) => asset.kind === "native" && asset.logicalName.startsWith("codex/skills/")
-    );
-    const target = {
-      label: "codex-collection",
-      assets: codexNative.map((asset) => ({
-        kind: "skills" as const,
-        logicalName: asset.logicalName.slice("codex/skills/".length),
-        digest: asset.contentDigest
-      })),
-      supportedKinds: new Set(["skills" as const])
-    };
+    const SOURCE_PREFIX = "global/skills/";
+    // Native variants live under global/native/<adapter>/..., so the logical
+    // prefix (what the target collection calls the asset) and the repository
+    // path prefix are different strings.
+    const TARGET_LOGICAL_PREFIX = "codex/skills/";
+    const TARGET_PATH_PREFIX = "global/native/codex/skills/";
+
+    // Real repository paths are kept alongside the semantic key so the UI can
+    // resolve one item at a time (INH-1857) without a second lookup channel.
+    const sourcePaths = new Map<string, string>();
+    const targetPaths = new Map<string, string>();
+    const sourceAssets = inventory.assets
+      .filter((asset) => asset.kind === "skills" && asset.sourceLogicalPath.startsWith(SOURCE_PREFIX))
+      .map((asset) => {
+        const logicalName = asset.sourceLogicalPath.slice(SOURCE_PREFIX.length);
+        sourcePaths.set(`skills|${logicalName}`, asset.sourceLogicalPath);
+        return { kind: "skills" as const, logicalName, digest: asset.contentDigest };
+      });
+    const targetAssets = inventory.assets
+      .filter(
+        (asset) => asset.kind === "native" && asset.logicalName.startsWith(TARGET_LOGICAL_PREFIX)
+      )
+      .map((asset) => {
+        const logicalName = asset.logicalName.slice(TARGET_LOGICAL_PREFIX.length);
+        targetPaths.set(`skills|${logicalName}`, asset.sourceLogicalPath);
+        return { kind: "skills" as const, logicalName, digest: asset.contentDigest };
+      });
+
     const comparison = compareCollections({
       repositoryId: this.openRepositoryId,
-      source,
-      target,
+      source: { label: "global-skills", assets: sourceAssets, supportedKinds: new Set(["skills"] as const) },
+      target: { label: "codex-collection", assets: targetAssets, supportedKinds: new Set(["skills"] as const) },
       baselines: {},
       trustedBaseline: false
     });
     return {
       confidence: comparison.confidence,
-      diffs: comparison.diffs.map((diff) => ({
-        assetKey: diff.semanticKey,
-        kind: diff.kind,
-        relation: diff.relation
-      }))
+      diffs: comparison.diffs.map((diff) => {
+        // A side that does not exist yet still gets its destination path, so
+        // the UI never assembles repository paths itself.
+        const logicalName = diff.semanticKey.slice("skills|".length);
+        const existingSource = sourcePaths.get(diff.semanticKey) ?? null;
+        const existingTarget = targetPaths.get(diff.semanticKey) ?? null;
+        return {
+          assetKey: diff.semanticKey,
+          sourceAssetKey: existingSource ?? (existingTarget !== null ? `${SOURCE_PREFIX}${logicalName}` : null),
+          targetAssetKey:
+            existingTarget ?? (existingSource !== null ? `${TARGET_PATH_PREFIX}${logicalName}` : null),
+          kind: diff.kind,
+          relation: diff.relation
+        };
+      })
     };
   }
 
@@ -581,6 +591,82 @@ export class CapabilityServiceV2 {
         };
       })
       .sort((left, right) => (left.displayName < right.displayName ? -1 : 1));
+  }
+
+  /**
+   * Scans a harness root and reports what is really on disk (INH-1854).
+   *
+   * Safety: symlinks are skipped (never followed), traversal is bounded, only
+   * relative paths are returned, and `managed` is true only when a
+   * SyncBaseline proves RuleSwitch wrote that path — an unmanaged local file
+   * is never claimed.
+   */
+  async scanHarness(harnessInstanceId: string): Promise<HarnessScanReadModel | null> {
+    const registrations = this.options.harnessRegistry?.listRegistrations() ?? [];
+    const registration = registrations.find(
+      (candidate) => candidate.harnessInstanceId === harnessInstanceId
+    );
+    if (registration === undefined) {
+      return null;
+    }
+    const matrixRow = matrixRowFor(registration.adapterId);
+    const base = {
+      harnessInstanceId: registration.harnessInstanceId,
+      adapterId: registration.adapterId,
+      displayName: registration.displayName,
+      scannedAt: new Date().toISOString()
+    };
+    if (matrixRow === null) {
+      return {
+        ...base,
+        rootPresent: false,
+        truncated: false,
+        files: [],
+        managedCount: 0,
+        unclassifiedCount: 0
+      };
+    }
+    const root = path.join(process.env.HOME ?? "", matrixRow.paths.globalRoot);
+    const rootPresent = await isDirectory(root);
+    if (!rootPresent) {
+      return {
+        ...base,
+        rootPresent: false,
+        truncated: false,
+        files: [],
+        managedCount: 0,
+        unclassifiedCount: 0
+      };
+    }
+
+    const { files, truncated } = await walkHarnessRoot(root, MAX_HARNESS_FILES, MAX_HARNESS_DEPTH);
+    const mapped: HarnessFileDto[] = [];
+    for (const file of files) {
+      const digest = digestBytes(file.content);
+      mapped.push({
+        relativePath: file.relativePath,
+        byteLength: file.content.byteLength,
+        digest,
+        kind: classifyHarnessPath(file.relativePath),
+        managed:
+          this.options.baselineStore !== undefined && this.openRepositoryId !== null
+            ? this.options.baselineStore.find(
+                this.openRepositoryId,
+                registration.harnessInstanceId,
+                file.relativePath
+              ) !== null
+            : false
+      });
+    }
+    mapped.sort((left, right) => (left.relativePath < right.relativePath ? -1 : 1));
+    return {
+      ...base,
+      rootPresent: true,
+      truncated,
+      files: mapped,
+      managedCount: mapped.filter((file) => file.managed).length,
+      unclassifiedCount: mapped.filter((file) => file.kind === null).length
+    };
   }
 
   async operationHistory(): Promise<readonly OperationHistoryDto[]> {
@@ -819,10 +905,14 @@ export class CapabilityServiceV2 {
     if (!plan.ok) {
       return false;
     }
-    const { writeFile } = await import("node:fs/promises");
+    const { mkdir, writeFile } = await import("node:fs/promises");
     for (const write of plan.preview.writes) {
       if (write.content !== null) {
-        await writeFile(this.safeRepoPath(write.logicalPath), write.content);
+        const absolute = this.safeRepoPath(write.logicalPath);
+        // New repository files (e.g. promoting a target-only asset) need their
+        // parent directories; containment is already enforced by safeRepoPath.
+        await mkdir(path.dirname(absolute), { recursive: true });
+        await writeFile(absolute, write.content);
       }
     }
     return true;
@@ -1664,4 +1754,105 @@ interface PlannedApply {
     readonly content: Uint8Array;
   }[];
   readonly targets: readonly ResolvedApplyTarget[];
+}
+
+/** Bounds for harness scanning: enough to be useful, small enough to stay fast. */
+const MAX_HARNESS_FILES = 2000;
+const MAX_HARNESS_DEPTH = 6;
+
+async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return (await stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Depth- and count-bounded walk. Symlinks are skipped entirely: following one
+ * would let a harness root point the scanner outside itself.
+ */
+async function walkHarnessRoot(
+  root: string,
+  maxFiles: number,
+  maxDepth: number
+): Promise<{ files: { relativePath: string; content: Uint8Array }[]; truncated: boolean }> {
+  const files: { relativePath: string; content: Uint8Array }[] = [];
+  let truncated = false;
+
+  async function visit(directory: string, prefix: string, depth: number): Promise<void> {
+    if (truncated || depth > maxDepth) {
+      truncated = truncated || depth > maxDepth;
+      return;
+    }
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
+      const relativePath = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await visit(path.join(directory, entry.name), relativePath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      try {
+        files.push({ relativePath, content: new Uint8Array(await readFile(path.join(directory, entry.name))) });
+      } catch {
+        // Unreadable file: report nothing rather than a fabricated entry.
+      }
+    }
+  }
+
+  await visit(root, "", 0);
+  return { files, truncated };
+}
+
+/**
+ * Classifies a harness-relative path into an asset kind using layout
+ * conventions that hold across the four adapters. Unknown layouts return
+ * null instead of a guess.
+ */
+function classifyHarnessPath(relativePath: string): AssetKind | null {
+  const segments = relativePath.split("/");
+  const first = segments[0] ?? "";
+  if (first === "skills") {
+    return "skills";
+  }
+  if (first === "prompts" || first === "commands") {
+    return "commands";
+  }
+  if (first === "rules") {
+    return "instructions";
+  }
+  if (first === "agents" || first === "subagents") {
+    return "agents";
+  }
+  if (first === "hooks") {
+    return "hooks";
+  }
+  if (first === "native") {
+    return "native";
+  }
+  if (segments.length === 1 && (first === "AGENTS.md" || first === "CLAUDE.md")) {
+    return "instructions";
+  }
+  if (segments.length === 1 && (first === "config.toml" || first === "settings.json")) {
+    return "settings";
+  }
+  if (segments.length === 1 && first === "mcp.json") {
+    return "mcp";
+  }
+  return null;
 }

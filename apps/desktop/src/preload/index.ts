@@ -173,6 +173,10 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["harnesses.list"], {})) as Awaited<
       ReturnType<DesktopApiV2["listHarnesses"]>
     >,
+  scanHarness: async (harnessInstanceId: string) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["harnesses.scan"], { harnessInstanceId })
+    ) as Awaited<ReturnType<DesktopApiV2["scanHarness"]>>,
   operationHistory: async () =>
     unwrap(await ipcRenderer.invoke(IPC_V2_CHANNELS["history.operations"], {})) as Awaited<
       ReturnType<DesktopApiV2["operationHistory"]>

@@ -97,7 +97,15 @@ describe("v2 UI read-model helpers (INH-1808/1810/1811)", () => {
     expect(relationLabel("both-modified")).toContain("需先解决");
     const compare: SetCompareReadModel = {
       confidence: "unknown-baseline",
-      diffs: [{ assetKey: "skills|a", kind: "skills", relation: "both-modified" }]
+      diffs: [
+        {
+          assetKey: "skills|a",
+          sourceAssetKey: "global/skills/a/SKILL.md",
+          targetAssetKey: "native/codex/skills/a/SKILL.md",
+          kind: "skills",
+          relation: "both-modified"
+        }
+      ]
     };
     expect(setCompareSummary(compare)).toContain("无可信共同基线");
   });
