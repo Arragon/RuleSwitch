@@ -24,7 +24,9 @@ import type {
   RollbackOutcome,
   RepositoryValidation,
   SetCompareReadModel,
-  SettingsReadModel
+  SettingsReadModel,
+  ApplyDiffReadModel,
+  ApplyFileDiff
 } from "@ruleswitch/core";
 import {
   buildApplyPlan,
@@ -56,7 +58,7 @@ import {
 import type { GitPortAdapter } from "../infrastructure/git/git-port-adapter";
 import type { ProjectsStore, SettingsStore } from "../infrastructure/git/binding-store";
 import type { SyncBaselineStore } from "../infrastructure/git/baseline-store";
-import type { BatchSnapshotStore } from "../infrastructure/git/batch-snapshot-store";
+import type { BatchSnapshotStore, BatchSnapshotManifest } from "../infrastructure/git/batch-snapshot-store";
 import type { OperationsStore } from "../infrastructure/git/sync-state";
 import { applyRenderedTargets } from "../infrastructure/harness/skill-slice";
 
@@ -81,7 +83,25 @@ export interface CapabilityV2Options {
     }[];
   };
   readonly hasher: StableIdHasher;
+  /**
+   * Process-crash drill seam (test/CI only). Called at every durable phase
+   * of a batch apply so a drill can kill the process — by SIGKILL, not by
+   * throwing — and then inspect what survived on disk. Production never
+   * supplies it, so the call sites cost nothing.
+   */
+  readonly crashHook?: (phase: ApplyCrashPhase) => void;
 }
+
+/**
+ * Durable phases of one batch apply. Everything between two phases must be
+ * reconstructible from the journal + snapshot store after a hard kill.
+ */
+export type ApplyCrashPhase =
+  | "journal-started"
+  | "snapshot-recorded"
+  | "write-started"
+  | "write-finished"
+  | "target-committed";
 
 function kindGroupOf(kind: AssetKind): string {
   const groups: Record<AssetKind, string> = {
@@ -706,11 +726,15 @@ export class CapabilityServiceV2 {
     const withAvailability = await Promise.all(
       batches.map(async (journal) => {
         const snapshot = snapshotStore === undefined ? null : await snapshotStore.load(journal.batchId);
-        return { journal, snapshotAvailable: snapshot !== null };
+        // "A snapshot exists" is not the same as "it can be restored": every
+        // file must still hold the bytes apply wrote (or be absent when it
+        // never existed). Otherwise the button would be a lie.
+        const restorable = snapshot === null ? false : await this.snapshotRestorable(snapshot);
+        return { journal, snapshotAvailable: snapshot !== null, restorable };
       })
     );
     return {
-      batches: withAvailability.map(({ journal, snapshotAvailable }) => ({
+      batches: withAvailability.map(({ journal, snapshotAvailable, restorable }) => ({
         batchId: journal.batchId,
         planId: journal.planId,
         status: journal.status,
@@ -726,6 +750,7 @@ export class CapabilityServiceV2 {
           })),
         rollbackAvailable:
           snapshotAvailable &&
+          restorable &&
           journal.status !== "ROLLED_BACK" &&
           journal.status !== "RUNNING",
         rollbackReason:
@@ -733,9 +758,11 @@ export class CapabilityServiceV2 {
             ? "该批次已回滚"
             : journal.status === "RUNNING"
               ? "批次仍在执行，不能回滚"
-              : snapshotAvailable
-                ? null
-                : "该批次没有记录 apply 前快照（早于快照持久化），无法自动回滚",
+              : !snapshotAvailable
+                ? "该批次没有记录 apply 前快照（早于快照持久化），无法自动回滚"
+                : !restorable
+                  ? "目标内容与 apply 写入的字节已不一致，回滚无法自证安全"
+                  : null,
         guidance:
           journal.status === "RECOVERY_REQUIRED"
             ? "该批次无法自证回滚。请用 Git 恢复受影响文件，确认真实状态后再重新应用。"
@@ -1026,6 +1053,91 @@ export class CapabilityServiceV2 {
     };
   }
 
+  /**
+   * Line-level diff material for ONE planned target (INH-1814). Read-only:
+   * the target bytes are read fresh from disk and nothing is written. Both
+   * sides are decoded here because only Main may touch the harness
+   * filesystem — the Renderer receives text, never a path.
+   */
+  async diffApplyTarget(
+    input: ApplyInput & { readonly targetKey: string; readonly planRevision?: string }
+  ): Promise<ApplyDiffReadModel> {
+    const planned = await this.planApply(input);
+    if (input.planRevision !== undefined && input.planRevision !== planned.planRevision) {
+      throw new Error(
+        "plan is stale: the repository, targets or adoption consent changed since the preview; re-run preview before reviewing the diff"
+      );
+    }
+    const meta = planned.entryMeta.get(input.targetKey);
+    if (meta === undefined) {
+      return {
+        targetKey: input.targetKey,
+        planRevision: planned.planRevision,
+        displayName: "",
+        assetKind: "",
+        mode: input.mode,
+        action: "unknown",
+        files: [],
+        reason: `预览计划中已无此目标，请重新预览后再查看差异`
+      };
+    }
+    const planEntry = planned.planEntries.find((entry) => entry.targetKey === input.targetKey);
+    const action = planEntry?.action ?? "blocked";
+    const executable = planned.executable.find((candidate) => candidate.targetKey === input.targetKey);
+    if (executable === undefined || meta.target.scopeRoot === null) {
+      return {
+        targetKey: input.targetKey,
+        planRevision: planned.planRevision,
+        displayName: meta.target.displayName,
+        assetKind: meta.kind,
+        mode: meta.target.mode,
+        action,
+        files: [],
+        reason: meta.target.blockedReason ?? "目标当前不可写，无法读取其现有内容"
+      };
+    }
+
+    const files: ApplyFileDiff[] = [];
+    for (const asset of executable.kindAssets) {
+      const source = decodeTextBytes(asset.content);
+      let targetText: string | null = null;
+      let targetExists = false;
+      let binary = source.binary;
+      if (isSafeRelativePath(asset.logicalName)) {
+        try {
+          const current = new Uint8Array(
+            await readFile(path.join(meta.target.scopeRoot, asset.logicalName))
+          );
+          const decoded = decodeTextBytes(current);
+          targetExists = true;
+          binary = binary || decoded.binary;
+          targetText = decoded.text;
+        } catch {
+          targetExists = false;
+        }
+      }
+      files.push({
+        logicalName: asset.logicalName,
+        sourceText: source.text,
+        targetText,
+        targetExists,
+        binary,
+        identical: !binary && source.text === targetText
+      });
+    }
+
+    return {
+      targetKey: input.targetKey,
+      planRevision: planned.planRevision,
+      displayName: meta.target.displayName,
+      assetKind: meta.kind,
+      mode: executable.mode,
+      action,
+      files,
+      reason: null
+    };
+  }
+
   async applyToHarnesses(input: ApplyInput & { readonly planRevision?: string }): Promise<ApplyOutcome> {
     const planned = await this.planApply(input);
     if (input.planRevision !== undefined && input.planRevision !== planned.planRevision) {
@@ -1063,6 +1175,12 @@ export class CapabilityServiceV2 {
       })
     };
 
+    // Crash-safety rule: the journal is persisted before any byte is touched
+    // and after every phase transition, so a killed process leaves a record
+    // that explains itself (see `reconcileInterruptedBatches`).
+    await this.options.operationsStore.saveBatchJournal(journal);
+    this.options.crashHook?.("journal-started");
+
     const headRevision = await this.headRevision();
 
     for (const entry of journal.entries) {
@@ -1075,7 +1193,31 @@ export class CapabilityServiceV2 {
         entry.failureDetail = "harness root not resolvable";
         continue;
       }
+
+      // 1) Snapshot the pre-apply bytes BEFORE the write: a crash after this
+      //    point can always be restored, whether or not the write landed.
+      const preApplyFiles = await readExistingTargetFiles(
+        work.target.scopeRoot,
+        work.kindAssets.map((asset) => asset.logicalName)
+      );
+      await this.recordSnapshot({
+        batchId: journal.batchId,
+        targetKey: entry.targetKey,
+        targetRoot: work.target.scopeRoot,
+        files: preApplyFiles,
+        assets: work.kindAssets
+      });
+      entry.state = "SNAPSHOTTED";
+      entry.snapshotRef = `snap-${entry.targetKey}`;
+      await this.persistJournal(journal);
+      this.options.crashHook?.("snapshot-recorded");
+
+      // 2) Mark the write as started and persist, so an interrupted write is
+      //    distinguishable from one that never began.
       entry.state = "APPLYING";
+      await this.persistJournal(journal);
+      this.options.crashHook?.("write-started");
+
       const applied = await applyRenderedTargets({
         targetRoot: work.target.scopeRoot,
         targets: work.kindAssets.map((asset) => ({
@@ -1085,9 +1227,10 @@ export class CapabilityServiceV2 {
         firstAdoptionConfirmed: confirmAdoption,
         baselineDigests: work.baselines
       });
+      this.options.crashHook?.("write-finished");
+
       if (applied.ok) {
         entry.state = "COMMITTED";
-        entry.snapshotRef = `snap-${entry.targetKey}`;
         entry.verifyDigest = work.kindAssets.map((asset) => digestBytes(asset.content)).join(",");
         await this.advanceBaselines({
           target: work.target,
@@ -1095,13 +1238,8 @@ export class CapabilityServiceV2 {
           repositoryRevision: headRevision,
           batchId: journal.batchId
         });
-        await this.recordSnapshot({
-          batchId: journal.batchId,
-          targetKey: entry.targetKey,
-          targetRoot: work.target.scopeRoot,
-          files: applied.snapshot.files,
-          assets: work.kindAssets
-        });
+        await this.persistJournal(journal);
+        this.options.crashHook?.("target-committed");
       } else {
         // Distinguish preflight refusals from write/verify failures so the
         // recovery surface can tell the operator what actually happened.
@@ -1113,6 +1251,7 @@ export class CapabilityServiceV2 {
               ? "VERIFY_FAILED"
               : "APPLY_FAILED";
         entry.failureDetail = applied.message;
+        await this.persistJournal(journal);
         // Frozen batch rule: a failing target stops not-yet-started targets.
         break;
       }
@@ -1276,6 +1415,128 @@ export class CapabilityServiceV2 {
   }
 
   /**
+   * Whether every file in a snapshot still holds exactly the bytes apply
+   * wrote. A file that is absent and never existed counts as restorable:
+   * nothing was written, so the pre-apply state is already in place.
+   */
+  private async snapshotRestorable(manifest: BatchSnapshotManifest): Promise<boolean> {
+    for (const target of manifest.targets) {
+      for (const file of target.files) {
+        if (!isSafeRelativePath(file.relativePath)) {
+          return false;
+        }
+        let digest: string | null = null;
+        try {
+          digest = digestBytes(new Uint8Array(await readFile(path.join(target.targetRoot, file.relativePath))));
+        } catch {
+          digest = null;
+        }
+        if (digest === file.appliedDigest) {
+          continue;
+        }
+        if (digest === null && !file.existedBefore) {
+          continue;
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Journal write used between phases so a kill never loses the state. */
+  private async persistJournal(journal: BatchJournal): Promise<void> {
+    journal.updatedAt = new Date().toISOString();
+    await this.options.operationsStore.saveBatchJournal(journal);
+  }
+
+  /**
+   * Crash reconciliation (INH-1789). A batch left RUNNING on disk means the
+   * process died mid-apply. For every target that was mid-flight this reads
+   * the real bytes and decides from them:
+   * - bytes == what we meant to write  → the write landed, verify it;
+   * - bytes == what was there before   → nothing was written;
+   * - anything else                     → unknown, operator must verify.
+   * No guessing: an unknown outcome stays RECOVERY_REQUIRED.
+   */
+  async reconcileInterruptedBatches(): Promise<readonly string[]> {
+    const snapshotStore = this.options.snapshotStore;
+    const reconciled: string[] = [];
+    for (const journal of this.options.operationsStore.listUnsettledBatches()) {
+      if (journal.status !== "RUNNING") {
+        continue;
+      }
+      const snapshot = snapshotStore === undefined ? null : await snapshotStore.load(journal.batchId);
+      let unknown = false;
+      for (const entry of journal.entries) {
+        if (entry.state !== "SNAPSHOTTED" && entry.state !== "APPLYING") {
+          continue;
+        }
+        const files = snapshot?.targets.find((target) => target.targetKey === entry.targetKey)?.files;
+        if (files === undefined) {
+          // No snapshot survived: the write outcome cannot be proven.
+          entry.state = "APPLY_FAILED";
+          entry.failureDetail = "进程在写入过程中被中断，且没有可用的 apply 前快照，无法自证结果";
+          unknown = true;
+          continue;
+        }
+        let allApplied = true;
+        let allPrevious = true;
+        for (const file of files) {
+          if (!isSafeRelativePath(file.relativePath)) {
+            allApplied = false;
+            allPrevious = false;
+            continue;
+          }
+          const root = snapshot?.targets.find((target) => target.targetKey === entry.targetKey)?.targetRoot;
+          if (root === undefined) {
+            allApplied = false;
+            allPrevious = false;
+            continue;
+          }
+          let digest: string | null = null;
+          try {
+            digest = digestBytes(new Uint8Array(await readFile(path.join(root, file.relativePath))));
+          } catch {
+            digest = null;
+          }
+          if (digest !== file.appliedDigest) {
+            allApplied = false;
+          }
+          if (file.existedBefore ? digest !== file.previousDigest : digest !== null) {
+            allPrevious = false;
+          }
+        }
+        if (allApplied) {
+          entry.state = "COMMITTED";
+          entry.verifyDigest = files.map((file) => file.appliedDigest).join(",");
+          entry.failureDetail = null;
+        } else if (allPrevious) {
+          entry.state = "PENDING";
+          entry.failureDetail = "进程在写入前被中断，本目标未写入";
+        } else {
+          entry.state = "APPLY_FAILED";
+          entry.failureDetail = "进程在写入过程中被中断，目标内容与预期不一致，需人工核对";
+          unknown = true;
+        }
+      }
+      for (const entry of journal.entries) {
+        if (entry.state === "PENDING" && entry.failureDetail === null) {
+          entry.failureDetail = "进程在批次执行中被中断，本目标未开始写入";
+        }
+      }
+      if (unknown) {
+        journal.status = "RECOVERY_REQUIRED";
+      } else {
+        settleBatch(journal, () => new Date().toISOString());
+      }
+      journal.updatedAt = new Date().toISOString();
+      await this.options.operationsStore.saveBatchJournal(journal);
+      reconciled.push(journal.batchId);
+    }
+    return reconciled;
+  }
+
+  /**
    * Persists the pre-apply bytes for one target. Saved per target (not once
    * per batch) so a crash mid-batch still leaves earlier targets restorable.
    */
@@ -1377,6 +1638,13 @@ export class CapabilityServiceV2 {
           current = null;
         }
         const currentDigest = current === null ? null : digestBytes(current);
+        if (current === null && !file.existedBefore) {
+          // The write never landed (crash before apply): the target is
+          // already in its pre-apply state, so this counts as restored
+          // instead of a divergence failure.
+          restored += 1;
+          continue;
+        }
         if (currentDigest !== file.appliedDigest) {
           // Diverged since apply: never clobber a later edit.
           failed += 1;
@@ -1674,8 +1942,57 @@ function applyEntryKey(target: ResolvedApplyTarget, kind: AssetKind): string {
   return `${target.harnessInstanceId}|${scopeKey}|${kind}`;
 }
 
+/**
+ * Reads the current bytes of the target files before any write. `null`
+ * content means "the file does not exist yet" — the snapshot must be able to
+ * restore that absence, not an empty file.
+ */
+async function readExistingTargetFiles(
+  targetRoot: string,
+  logicalNames: readonly string[]
+): Promise<
+  readonly { readonly relativePath: string; readonly existedBefore: boolean; readonly previousContent: Uint8Array | null }[]
+> {
+  const files: {
+    relativePath: string;
+    existedBefore: boolean;
+    previousContent: Uint8Array | null;
+  }[] = [];
+  for (const logicalName of logicalNames) {
+    if (!isSafeRelativePath(logicalName)) {
+      continue;
+    }
+    try {
+      files.push({
+        relativePath: logicalName,
+        existedBefore: true,
+        previousContent: new Uint8Array(await readFile(path.join(targetRoot, logicalName)))
+      });
+    } catch {
+      files.push({ relativePath: logicalName, existedBefore: false, previousContent: null });
+    }
+  }
+  return files;
+}
+
 function digestBytes(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * UTF-8 decode with an honest binary verdict: a NUL byte or an invalid
+ * sequence is reported instead of silently replaced, so the diff surface
+ * never renders a lossy approximation of the bytes it is about to write.
+ */
+function decodeTextBytes(content: Uint8Array): { readonly text: string | null; readonly binary: boolean } {
+  if (content.includes(0)) {
+    return { text: null, binary: true };
+  }
+  try {
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(content), binary: false };
+  } catch {
+    return { text: null, binary: true };
+  }
 }
 
 /**

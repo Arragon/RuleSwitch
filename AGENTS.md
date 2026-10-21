@@ -24,11 +24,12 @@
 - M7 产品 UI 进行中：`packages/ui/src/app-v2.tsx` 为七页 shell（Overview / 配置库 / 本机 AI 工具 / 项目 / 同步变更 / 历史 / 设置），消费只读 v2 read model；Phase A v1 workbench 在兼容窗口内保留（`RULESWITCH_SMOKE_WORKSPACE` 触发 v1 smoke 渲染）。
 - 2026-10-20 macOS 实测（Electron 43.4.1）：typecheck 4 workspace 通过；lint 0 error；unit 286；integration 69（真实 bare remote、FF-only、remote race、Index 三版本 diff、discard 备份）；E2E 8（v2 shell 7 + Phase A walking skeleton 1）。
 - Phase A 原始证据为 Windows（Node 22.18.0 / Electron 43.4.1）；macOS 已由上述 run 覆盖；Linux 未测试。fixtures/abstraction 不能代替 native runner。
-- 协议变更见 ADR-0009（read-file / apply targets / adoption / preview / validate / project binding / recovery）；`IPC_V2_METHODS` 现为 29。
+- 协议变更见 ADR-0009（read-file / apply targets / adoption / preview / diff / validate / project binding / recovery / crash reconcile）；`IPC_V2_METHODS` 现为 30。
 - `hasOwnership` 已接 `SyncBaselineStore`（`v2/sync-baselines-v1.json`）：重复应用为 `noop`，本机改动后再应用被拒为 `UNMANAGED_TARGET_CHANGED`。
 - apply 前字节由 `BatchSnapshotStore`（`v2/batch-snapshots/`）持久化，`rollbackBatch` 可逐字节恢复；apply 后被改动的文件会被拒绝覆盖并让批次转 `RECOVERY_REQUIRED`。`rollbackAvailable` 由真实快照推导。
-- M7 未完成面：onboarding 仍无 clone 与 credential 交互；统一 Preview 已有（previewApply + Monaco Diff 尚未接入 v2 流程）；本机工具详情仍为只读列表；仓库内逐项处理（INH-1857）仍只有 summary；项目详情已完成绑定与继承标记的基础面。M8 已开始（失败状态区分、recovery 诊断、baseline），packaging/signing/CI 与 M9/M10 未开始。
-- Workspace/repository 稳定身份已落地；跨重启 history rebind 由 v2 stores 承担，旧 unversioned ledger 只读保留。完整 crash repair UI 仍缺（manifest scan + mutation gate 已有）。
+- M7 未完成面：onboarding 仍无 clone 与 credential 交互；本机工具详情仍为只读列表；仓库内逐项处理（INH-1857）仍只有 summary；项目详情已完成绑定与继承标记的基础面。M8 已开始（失败状态区分、recovery 诊断、baseline），packaging/signing/CI 与 M9/M10 未开始。
+- v2 Preview 已接入行级 diff：`apply.diff`（`diffApplyTarget`）由 Main 解码两侧文本（左＝本机现状，右＝将写入的仓库字节），Renderer 用 Monaco DiffEditor 只读渲染；非 UTF-8/含 NUL 的内容标记为 `binary` 并拒绝渲染，stale `planRevision` 与 apply 一样被拒。
+- 崩溃安全：batch apply 在每个持久阶段落盘 journal（`journal-started` → `snapshot-recorded` → `write-started` → `write-finished` → `target-committed`），快照在**写入之前**持久化；启动时 `reconcileInterruptedBatches()` 用真实字节判定中断结果（等于将写入的字节＝已提交；等于写入前字节＝未写入；否则 `RECOVERY_REQUIRED`）。`tests/integration/crash-matrix.integration.test.ts` 以 **SIGKILL 真杀进程**覆盖 5 个断点。
 - 构建派生陷阱：`packages/*` 与 `apps/*` 的 unit/integration 测试解析 `@ruleswitch/core` 的 **dist**，因此 `test:unit` / `test:integration` / `packages/ui` 的 `build`+`typecheck` 都先构建 core；改 core 源码后不要直接跑 vitest，否则会对着旧产物得到假结果。
 - Node engine `>=22.13.0`，pnpm 固定 11.24.0；当前环境裸 `pnpm` 不在 PATH。
 

@@ -63,6 +63,14 @@ async function createMainWindow(): Promise<void> {
     }
   });
 
+  // Crash reconciliation: a batch still RUNNING on disk means the previous
+  // process died mid-apply. Settle it from the real bytes before the UI can
+  // offer any further mutation.
+  const reconciled = await capabilities.reconcileInterruptedBatches();
+  if (reconciled.length > 0) {
+    console.warn(`ruleswitch: reconciled ${reconciled.length} interrupted batch(es): ${reconciled.join(", ")}`);
+  }
+
   const window = new BrowserWindow({
     width: 1100,
     height: 760,

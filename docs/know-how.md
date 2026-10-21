@@ -47,7 +47,9 @@
 ## Cross-platform Pitfalls
 
 - OS 分支只应存在 Platform/Filesystem/Packaging boundary。当前 Windows case-fold 位于 filesystem adapter。
-- Atomic rename、permissions、locking、case、symlink、watcher 与 packaging 必须在 native Windows/macOS/Linux 验证；crash-phase 与 rollback itself failure 也仍待 fault matrix。
+- Atomic rename、permissions、locking、case、symlink、watcher 与 packaging 必须在 native Windows/macOS/Linux 验证。
+- crash-phase 已有进程级 fault matrix（SIGKILL 真杀子进程，5 个持久断点，见 `tests/integration/crash-matrix.integration.test.ts`）；rollback itself failure 仍待 native Windows/Linux 验证。
+- 崩溃演练子进程通过 `vitest.crash-drill.config.ts` + `tests/crash/*.child.test.ts` 拉起：故意不匹配任何默认 glob，避免自杀式测试被常规 run 带起；子进程先 SIGKILL 父 runner 再自杀，父测试据此观察到 `signal === "SIGKILL"`。
 - Monaco bundle 较大；优化应保持现有 worker/CSP 和 Editor/Diff 功能。
 
 ## Supply-chain and Licensing

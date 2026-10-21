@@ -142,6 +142,28 @@ export function registerV2IpcHandlers(
         ...(targets === undefined ? {} : { targets })
       });
     },
+    "apply.diff": async (request) => {
+      const { assets, mode, confirmAdoption, targets, targetKey, planRevision } = request as {
+        assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[];
+        mode: "overwrite" | "merge-add" | "add-only";
+        targetKey: string;
+        confirmAdoption?: boolean;
+        targets?: readonly {
+          harnessInstanceId: string;
+          mode?: "overwrite" | "merge-add" | "add-only";
+          scope?: { kind: "global" } | { kind: "project"; projectId: string };
+        }[];
+        planRevision?: string;
+      };
+      return capabilities.diffApplyTarget({
+        assets: decodeApplyAssets(assets),
+        mode,
+        targetKey,
+        ...(confirmAdoption === undefined ? {} : { confirmAdoption }),
+        ...(targets === undefined ? {} : { targets }),
+        ...(planRevision === undefined ? {} : { planRevision })
+      });
+    },
     "apply.toHarnesses": async (request) => {
       const { assets, mode, confirmAdoption, targets, planRevision } = request as {
         assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[];

@@ -46,6 +46,7 @@ export const IPC_V2_METHODS = [
   "settings.get",
   "settings.setTheme",
   "apply.preview",
+  "apply.diff",
   "apply.toHarnesses"
 ] as const;
 export type IpcV2Method = (typeof IPC_V2_METHODS)[number];
@@ -79,6 +80,7 @@ export const IPC_V2_CHANNELS: Record<IpcV2Method, string> = Object.freeze({
   "settings.get": "ruleswitch:v2:settings:get",
   "settings.setTheme": "ruleswitch:v2:settings:set-theme",
   "apply.preview": "ruleswitch:v2:operations:preview-apply",
+  "apply.diff": "ruleswitch:v2:operations:diff-apply",
   "apply.toHarnesses": "ruleswitch:v2:operations:apply-to-harnesses"
 });
 
@@ -195,6 +197,36 @@ export interface ApplyPreview {
   readonly needsAdoptionCount: number;
 }
 
+/**
+ * One file-level diff for the Preview surface (INH-1814 line-level review).
+ * Both sides are decoded on the Main side because only Main may touch the
+ * harness filesystem; the Renderer receives text, never a path. `binary`
+ * content is reported, not guessed — the UI then refuses to render it.
+ */
+export interface ApplyFileDiff {
+  /** Repository-relative logical name (opaque). */
+  readonly logicalName: string;
+  /** Bytes RuleSwitch would write, decoded as UTF-8 (null when binary). */
+  readonly sourceText: string | null;
+  /** Bytes currently on disk, decoded as UTF-8 (null when absent/binary). */
+  readonly targetText: string | null;
+  readonly targetExists: boolean;
+  readonly binary: boolean;
+  readonly identical: boolean;
+}
+
+export interface ApplyDiffReadModel {
+  readonly targetKey: string;
+  readonly planRevision: string;
+  readonly displayName: string;
+  readonly assetKind: string;
+  readonly mode: ApplyModeName;
+  readonly action: string;
+  readonly files: readonly ApplyFileDiff[];
+  /** Set when the target cannot be diffed (blocked target, unknown key). */
+  readonly reason: string | null;
+}
+
 const applyAssetRequestSchema = z.array(
   z.strictObject({
     assetKey: z.string().min(1),
@@ -266,6 +298,10 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   "settings.get": emptyRequestSchema,
   "settings.setTheme": setThemeRequestSchema,
   "apply.preview": applyRequestSchema,
+  "apply.diff": applyRequestSchema.extend({
+    targetKey: z.string().trim().min(1),
+    planRevision: z.string().min(1).optional()
+  }),
   "apply.toHarnesses": applyRequestSchema.extend({
     planRevision: z.string().min(1).optional()
   })
@@ -372,6 +408,16 @@ export interface DesktopApiV2 {
     mode: ApplyModeName,
     options?: ApplyOptions
   ): Promise<ApplyPreview>;
+  /**
+   * Text for one planned target: repository bytes vs the bytes currently on
+   * disk. Read-only; a stale `planRevision` is refused like `applyToHarnesses`.
+   */
+  diffApplyTarget(
+    assets: readonly ApplyAssetInput[],
+    mode: ApplyModeName,
+    targetKey: string,
+    options?: ApplyOptions & { readonly planRevision?: string }
+  ): Promise<ApplyDiffReadModel>;
   applyToHarnesses(
     assets: readonly ApplyAssetInput[],
     mode: ApplyModeName,
@@ -409,6 +455,7 @@ export const IPC_V2_METHOD_TO_API: Record<IpcV2Method, keyof DesktopApiV2> = Obj
   "settings.get": "getSettings",
   "settings.setTheme": "setTheme",
   "apply.preview": "previewApply",
+  "apply.diff": "diffApplyTarget",
   "apply.toHarnesses": "applyToHarnesses"
 });
 

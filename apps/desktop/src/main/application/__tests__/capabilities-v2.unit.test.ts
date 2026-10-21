@@ -96,10 +96,11 @@ describe("CapabilityServiceV2 (M7)", () => {
       getSettings: () => undefined,
       setTheme: () => undefined,
       previewApply: () => undefined,
+      diffApplyTarget: () => undefined,
       applyToHarnesses: () => undefined
     };
     expect(assertV2Surface(methods as never)).toEqual([]);
-    expect(assertV2Surface({} as never).length).toBe(29);
+    expect(assertV2Surface({} as never).length).toBe(30);
   });
 
   it("opens a repository and shapes the library read model with draft markers", async () => {

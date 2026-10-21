@@ -217,6 +217,30 @@ const ruleswitchV2: DesktopApiV2 = Object.freeze({
         ...(options?.targets === undefined ? {} : { targets: options.targets })
       })
     ) as Awaited<ReturnType<DesktopApiV2["previewApply"]>>,
+  diffApplyTarget: async (
+    assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[],
+    mode: "overwrite" | "merge-add" | "add-only",
+    targetKey: string,
+    options?: {
+      readonly confirmAdoption?: boolean;
+      readonly targets?: readonly {
+        readonly harnessInstanceId: string;
+        readonly mode?: "overwrite" | "merge-add" | "add-only";
+        readonly scope?: { readonly kind: "global" } | { readonly kind: "project"; readonly projectId: string };
+      }[];
+      readonly planRevision?: string;
+    }
+  ) =>
+    unwrap(
+      await ipcRenderer.invoke(IPC_V2_CHANNELS["apply.diff"], {
+        assets,
+        mode,
+        targetKey,
+        ...(options?.confirmAdoption === undefined ? {} : { confirmAdoption: options.confirmAdoption }),
+        ...(options?.targets === undefined ? {} : { targets: options.targets }),
+        ...(options?.planRevision === undefined ? {} : { planRevision: options.planRevision })
+      })
+    ) as Awaited<ReturnType<DesktopApiV2["diffApplyTarget"]>>,
   applyToHarnesses: async (
     assets: readonly { assetKey: string; kind: string; logicalName: string; contentBase64: string }[],
     mode: "overwrite" | "merge-add" | "add-only",

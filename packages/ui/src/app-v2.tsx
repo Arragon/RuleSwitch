@@ -4,6 +4,7 @@
 // available during the compatibility window.
 
 import type {
+  ApplyDiffReadModel,
   ApplyModeName,
   ApplyOutcome,
   ApplyPreview,
@@ -19,7 +20,8 @@ import type {
   RepositoryValidation,
   SetCompareReadModel,
   SettingsReadModel
-} from "@ruleswitch/core";import { NAV_PAGES, type NavPage } from "./app-v2-model";
+} from "@ruleswitch/core";import { ApplyDiffViewer } from "./apply-diff-viewer";
+import { NAV_PAGES, type NavPage } from "./app-v2-model";
 import { ConfirmDialog, type DialogRequest } from "./dialog";
 import {
   groupLibraryEntries,
@@ -131,6 +133,7 @@ export function AppV2({ api }: AppV2Props) {
   const [confirmAdoption, setConfirmAdoption] = useState(false);
   const [applyOutcome, setApplyOutcome] = useState<ApplyOutcome | null>(null);
   const [applyPreview, setApplyPreview] = useState<ApplyPreview | null>(null);
+  const [applyDiff, setApplyDiff] = useState<ApplyDiffReadModel | null>(null);
   const [editor, setEditor] = useState<{ readonly logicalPath: string; readonly content: string } | null>(
     null
   );
@@ -319,6 +322,7 @@ export function AppV2({ api }: AppV2Props) {
         return;
       }
       setApplyOutcome(null);
+      setApplyDiff(null);
       setApplyPreview(
         await api.previewApply(applyAssetsOf(current), applyMode, {
           confirmAdoption,
@@ -326,6 +330,42 @@ export function AppV2({ api }: AppV2Props) {
         })
       );
       setMessage("预览已生成；确认后才会写入");
+    });
+
+  /**
+   * Loads the real bytes for one planned target so the operator can review
+   * the change line by line before any write. Read-only; a stale plan is
+   * refused by Main and surfaced as an expired preview.
+   */
+  const viewDiff = (targetKey: string): Promise<void> =>
+    safeRun(async () => {
+      const current = library ?? (await api.browseLibrary());
+      if (current === null) {
+        setError("未连接配置库");
+        return;
+      }
+      if (applyPreview === null) {
+        setError("请先生成预览再查看差异");
+        return;
+      }
+      try {
+        setApplyDiff(
+          await api.diffApplyTarget(applyAssetsOf(current), applyMode, targetKey, {
+            confirmAdoption,
+            targets: selectedApplyTargets,
+            planRevision: applyPreview.planRevision
+          })
+        );
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "";
+        if (message.includes("stale")) {
+          setApplyPreview(null);
+          setApplyDiff(null);
+          setError("预览已过期（仓库或目标已变化），请重新预览后查看差异");
+          return;
+        }
+        throw cause;
+      }
     });
 
   const applySelected = (adoption: boolean): Promise<void> =>
@@ -367,6 +407,7 @@ export function AppV2({ api }: AppV2Props) {
         throw cause;
       }
       setApplyPreview(null);
+      setApplyDiff(null);
       setApplyOutcome(outcome);
       setMessage(
         `批量应用 ${outcome.status}：已应用 ${outcome.appliedCount} / 已同步 ${outcome.unchangedCount} / 未执行 ${outcome.blockedCount} / 失败 ${outcome.failedCount}`
@@ -1001,12 +1042,38 @@ export function AppV2({ api }: AppV2Props) {
                           {PREVIEW_ACTION_LABELS[entry.action] ?? entry.action}
                           {entry.blockedReason !== null ? ` — ${entry.blockedReason}` : ""}
                           {entry.requiresConfirmation ? "（需确认）" : ""}
+                          <button
+                            type="button"
+                            className="app-v2-inline-button"
+                            disabled={busy}
+                            onClick={() => void viewDiff(entry.targetKey)}
+                          >
+                            查看差异
+                          </button>
                         </li>
                       ))}
                     </ul>
                     <p className="app-v2-hint">
                       确认会按此计划写入；若仓库、目标或接管选择在预览后发生变化，写入会被拒绝并要求重新预览。
                     </p>
+                  </div>
+                )}
+
+                {applyPreview !== null &&
+                  applyDiff !== null &&
+                  applyDiff.planRevision === applyPreview.planRevision && (
+                  <div className="app-v2-outcome" role="group" aria-label="差异详情">
+                    <p>
+                      {applyDiff.displayName} · {applyDiff.assetKind} ·{" "}
+                      {PREVIEW_ACTION_LABELS[applyDiff.action] ?? applyDiff.action}
+                    </p>
+                    {applyDiff.reason !== null ? (
+                      <p className="app-v2-hint" role="alert">
+                        {applyDiff.reason}
+                      </p>
+                    ) : (
+                      <ApplyDiffViewer files={applyDiff.files} />
+                    )}
                   </div>
                 )}
 

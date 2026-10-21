@@ -587,3 +587,146 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     expect(await service.scanHarness("harn_unknown")).toBeNull();
   }, 90_000);
 });
+
+describe("CapabilityServiceV2.diffApplyTarget (INH-1814 line-level review)", () => {
+  const agentsAsset = {
+    assetKey: "asset_agents" as const,
+    kind: "instructions" as const,
+    logicalName: "AGENTS.md",
+    content: new Uint8Array()
+  };
+
+  it("returns both sides as text for an existing target", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# user local\n", "utf8");
+
+    const preview = await service.previewApply({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+    const diff = await service.diffApplyTarget({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targetKey: "harn_codex|global|instructions",
+      planRevision: preview.planRevision
+    });
+
+    expect(diff.reason).toBeNull();
+    expect(diff.action).toBe("needs-adoption");
+    expect(diff.files).toHaveLength(1);
+    expect(diff.files[0]?.logicalName).toBe("AGENTS.md");
+    expect(diff.files[0]?.targetExists).toBe(true);
+    expect(diff.files[0]?.identical).toBe(false);
+    // Left side is the real local file, right side is what would be written.
+    expect(diff.files[0]?.targetText).toBe("# user local\n");
+    expect(diff.files[0]?.sourceText).toBe("# global\n");
+    // No absolute path crosses the boundary.
+    expect(JSON.stringify(diff)).not.toContain(home);
+  }, 90_000);
+
+  it("reports an absent target as an empty original side", async () => {
+    const { repo, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const diff = await service.diffApplyTarget({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targetKey: "harn_codex|global|instructions"
+    });
+
+    expect(diff.files[0]?.targetExists).toBe(false);
+    expect(diff.files[0]?.targetText).toBeNull();
+    expect(diff.files[0]?.sourceText).toBe("# global\n");
+    expect(diff.files[0]?.binary).toBe(false);
+  }, 90_000);
+
+  it("marks non-text bytes as binary instead of decoding them lossily", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    // NUL byte on the source side and an invalid UTF-8 sequence on the target.
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), Buffer.from([0xff, 0xfe, 0xfd]), "binary");
+
+    const diff = await service.diffApplyTarget({
+      assets: [{ ...agentsAsset, content: new Uint8Array([0x00, 0x01, 0x02]) }],
+      mode: "overwrite",
+      targetKey: "harn_codex|global|instructions"
+    });
+
+    expect(diff.files[0]?.binary).toBe(true);
+    expect(diff.files[0]?.sourceText).toBeNull();
+    expect(diff.files[0]?.targetText).toBeNull();
+    expect(diff.files[0]?.identical).toBe(false);
+  }, 90_000);
+
+  it("reports an already-in-sync target as identical", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# global\n", "utf8");
+
+    const diff = await service.diffApplyTarget({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targetKey: "harn_codex|global|instructions"
+    });
+
+    expect(diff.files[0]?.identical).toBe(true);
+    expect(diff.files[0]?.sourceText).toBe(diff.files[0]?.targetText);
+  }, 90_000);
+
+  it("refuses a stale plan revision instead of diffing old bytes", async () => {
+    const { repo, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    await expect(
+      service.diffApplyTarget({
+        assets: [agentsAsset],
+        mode: "overwrite",
+        targetKey: "harn_codex|global|instructions",
+        planRevision: "not-the-current-revision"
+      })
+    ).rejects.toThrow(/stale/);
+  }, 90_000);
+
+  it("returns an actionable reason instead of files for a blocked target", async () => {
+    const { repo, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const preview = await service.previewApply({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targets: [{ harnessInstanceId: "harn_codex", scope: { kind: "project", projectId: "prj_missing" } }]
+    });
+    const targetKey = preview.entries[0]?.targetKey ?? "";
+    expect(targetKey.length).toBeGreaterThan(0);
+
+    const diff = await service.diffApplyTarget({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targetKey,
+      targets: [{ harnessInstanceId: "harn_codex", scope: { kind: "project", projectId: "prj_missing" } }]
+    });
+
+    expect(diff.files).toHaveLength(0);
+    expect(diff.action).toBe("blocked");
+    expect(diff.reason).toMatch(/not bound/);
+  }, 90_000);
+
+  it("reports an unknown target key instead of guessing", async () => {
+    const { repo, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const diff = await service.diffApplyTarget({
+      assets: [agentsAsset],
+      mode: "overwrite",
+      targetKey: "harn_codex|global|hooks"
+    });
+
+    expect(diff.files).toHaveLength(0);
+    expect(diff.reason).not.toBeNull();
+  }, 90_000);
+});

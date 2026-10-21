@@ -150,3 +150,32 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 
 - `IPC_V2_METHODS` 增至 **29**；`assertV2Surface` 期望值同步。
 - 仍无通用 fs/shell/path 能力。
+
+---
+
+## 补记（2026-10-21）：行级 diff 与进程崩溃断点
+
+### 16. `ruleswitch:v2:operations:diff-apply`（`diffApplyTarget`）
+
+- 目的：让 Preview 能显示**真实的逐行差异**，而不是结构化目标列表。请求沿用 `apply.preview` 的入参并追加 `targetKey`（可选 `planRevision`）。
+- 两侧文本都在 Main 解码：左＝目标当前字节，右＝将写入的仓库字节。Renderer 只拿到文本，**永远拿不到路径**。
+- 非文本内容（含 NUL 或非法 UTF-8）用 `binary: true` 报告并且 `sourceText/targetText` 为 null，UI 明确不渲染行级 diff，而不是给出有损近似（写入仍按字节原样进行）。
+- 与 apply 同一套 stale 保护：传入的 `planRevision` 与当前计划不符即拒绝。
+- 该通道只读：不写目标、不改基线、不产生 journal。
+
+### 17. batch apply 的持久阶段与崩溃恢复
+
+- 阶段（按顺序，每个阶段之间 journal 均已落盘）：`journal-started` → `snapshot-recorded` → `write-started` → `write-finished` → `target-committed`。
+- **快照前移**：pre-apply 字节在写入之前读取并落盘（原实现在写入并校验之后才存，崩溃窗口内无法回滚）。
+- `reconcileInterruptedBatches()` 在启动时对仍为 `RUNNING` 的批次用磁盘上的真实字节判定：
+  - 当前字节 == 将写入的字节 → `COMMITTED`（等价于通过写入后校验）；
+  - 当前字节 == 写入前字节（或文件仍不存在且本来就不存在）→ `PENDING`（未写入），批次结算为 `FAILED`；
+  - 两者都不是 → `APPLY_FAILED` + `RECOVERY_REQUIRED`，不做猜测，也不覆盖。
+- `rollbackAvailable` 增加“可恢复性”判定：快照存在但任一文件当前字节不等于写入字节时，按钮不再谎称可回滚。
+- 回滚对“崩溃发生在写入之前”的目标计为 restored（本就处于 apply 前状态），不再误报失败。
+
+### 影响
+
+- `IPC_V2_METHODS` 增至 **30**；`assertV2Surface` 期望值同步。
+- 新增 `tests/crash/crash-drill.child.test.ts` + `vitest.crash-drill.config.ts`（不匹配任何默认 glob，只被崩溃矩阵显式拉起）。
+- 崩溃矩阵进程级覆盖：子进程被 **SIGKILL** 真杀（非抛异常），父进程在磁盘上核对 journal / 快照 / 目标字节。
