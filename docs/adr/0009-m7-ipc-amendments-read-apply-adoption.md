@@ -185,3 +185,17 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 - 原实现返回 `registry` 中**首个**注册仓库。打开第二个仓库后，所有 root-based 读（library 资产字节、`readRepoFile`、`setCompare`、inventory）仍读第一个仓库 —— 在跨仓库场景下会把 A 的字节当成 B 的字节写入本机工具。
 - 现由 `GitPortAdapter` 记录 `activeRepositoryId`（`open` / `clone` 时更新），`currentRoot()` 优先取 active；新增 `currentRepositoryId()`。
 - 所有权仍然按 (repositoryId, harnessInstanceId, targetPath) 判定：A 的 baseline 不会让 B 免接管，也不会授权 A 覆盖 B 写入后又被改动的文件（回归见 `capabilities-v2.ownership.unit.test.ts`）。
+
+### 19. 批次中途写失败：错误必须入账，回滚按字节判定（2026-10-21 round 6）
+
+写阶段（`applyRenderedTargets`）的文件系统错误（EACCES 等）**不得逃逸**：原实现无 try/catch，异常抛给调用方、journal 停在 `APPLYING`，与崩溃不可区分且恢复面不可见。现固定为：`APPLY_FAILED` + `write failed: …` 详情落盘，未启动目标按 frozen batch rule 停止。
+
+回滚与可回滚性判定统一为三分支字节规则（与 `reconcileInterruptedBatches` 同口径）：
+
+- 当前字节 == `appliedDigest`（意图写入）→ 可恢复到快照；
+- 当前字节 == `previousDigest`（pre-apply）→ **写入从未落地**（中途失败/崩溃于写入前/已回滚），恢复为无操作，计 restored；
+- 其他 → 分歧，拒绝并报告，绝不覆盖。
+
+`rollbackAvailable` 额外要求批次至少一个 `COMMITTED` 目标：全预检失败的批次没有任何已提交目标，回滚 CTA 无意义（恢复面文案：「该批次没有已提交的目标，无需回滚」）。
+
+注入证据：`capabilities-v2.apply.unit.test.ts`「records a mid-batch write failure …」——第二 harness 根目录 chmod `0o555` 产生真实 EACCES；断言第一目标 COMMITTED 且可回滚、第二目标字节未动、回滚恢复精确字节。注意 `git status --porcelain` 断言必须 `trimEnd()` 而非 `trim()`：porcelain 把状态编码在**行首字符**（未暂存修改恰为 `" M "`），`trim()` 会把行首空格一并剥掉导致误判（见 INH-1857 验收 4 用例）。
