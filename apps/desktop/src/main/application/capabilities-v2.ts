@@ -753,7 +753,10 @@ export class CapabilityServiceV2 {
           snapshotAvailable &&
           restorable &&
           journal.status !== "ROLLED_BACK" &&
-          journal.status !== "RUNNING",
+          journal.status !== "RUNNING" &&
+          // A rollback CTA only makes sense when something was actually
+          // committed: a fully preflight-refused batch changed nothing.
+          journal.entries.some((entry) => entry.state === "COMMITTED"),
         rollbackReason:
           journal.status === "ROLLED_BACK"
             ? "该批次已回滚"
@@ -763,7 +766,9 @@ export class CapabilityServiceV2 {
                 ? "该批次没有记录 apply 前快照（早于快照持久化），无法自动回滚"
                 : !restorable
                   ? "目标内容与 apply 写入的字节已不一致，回滚无法自证安全"
-                  : null,
+                  : journal.entries.every((entry) => entry.state !== "COMMITTED")
+                    ? "该批次没有已提交的目标，无需回滚"
+                    : null,
         guidance:
           journal.status === "RECOVERY_REQUIRED"
             ? "该批次无法自证回滚。请用 Git 恢复受影响文件，确认真实状态后再重新应用。"
@@ -1219,15 +1224,30 @@ export class CapabilityServiceV2 {
       await this.persistJournal(journal);
       this.options.crashHook?.("write-started");
 
-      const applied = await applyRenderedTargets({
-        targetRoot: work.target.scopeRoot,
-        targets: work.kindAssets.map((asset) => ({
-          targetLogicalPath: asset.logicalName,
-          content: asset.content
-        })),
-        firstAdoptionConfirmed: confirmAdoption,
-        baselineDigests: work.baselines
-      });
+      // 3) A filesystem-level failure during the write/verify phase must land
+      //    in the journal as APPLY_FAILED. Letting it escape would strand the
+      //    batch in APPLYING — indistinguishable from a crash — and hide the
+      //    failure from the recovery surface (INH-1820: never leave a target
+      //    "unknown but writable").
+      let applied;
+      try {
+        applied = await applyRenderedTargets({
+          targetRoot: work.target.scopeRoot,
+          targets: work.kindAssets.map((asset) => ({
+            targetLogicalPath: asset.logicalName,
+            content: asset.content
+          })),
+          firstAdoptionConfirmed: confirmAdoption,
+          baselineDigests: work.baselines
+        });
+      } catch (error) {
+        entry.state = "APPLY_FAILED";
+        entry.failureDetail = `write failed: ${(error as Error).message}`;
+        await this.persistJournal(journal);
+        this.options.crashHook?.("write-finished");
+        // Frozen batch rule: a failing target stops not-yet-started targets.
+        break;
+      }
       this.options.crashHook?.("write-finished");
 
       if (applied.ok) {
@@ -1416,9 +1436,11 @@ export class CapabilityServiceV2 {
   }
 
   /**
-   * Whether every file in a snapshot still holds exactly the bytes apply
-   * wrote. A file that is absent and never existed counts as restorable:
-   * nothing was written, so the pre-apply state is already in place.
+   * Whether every file in a snapshot still holds bytes that rollback can
+   * reason about: either the bytes apply wrote (restorable to the snapshot)
+   * or the exact pre-apply bytes (the write never landed, or rollback already
+   * ran — the pre-apply state is already in place). A file that is absent
+   * and never existed counts as restorable: nothing was written.
    */
   private async snapshotRestorable(manifest: BatchSnapshotManifest): Promise<boolean> {
     for (const target of manifest.targets) {
@@ -1433,6 +1455,9 @@ export class CapabilityServiceV2 {
           digest = null;
         }
         if (digest === file.appliedDigest) {
+          continue;
+        }
+        if (digest !== null && digest === file.previousDigest) {
           continue;
         }
         if (digest === null && !file.existedBefore) {
@@ -1643,6 +1668,13 @@ export class CapabilityServiceV2 {
           // The write never landed (crash before apply): the target is
           // already in its pre-apply state, so this counts as restored
           // instead of a divergence failure.
+          restored += 1;
+          continue;
+        }
+        if (currentDigest !== null && currentDigest === file.previousDigest) {
+          // The write never landed for this file (mid-batch failure or crash
+          // before the write): the bytes already equal the pre-apply state,
+          // so restoring is a no-op, not a divergence.
           restored += 1;
           continue;
         }

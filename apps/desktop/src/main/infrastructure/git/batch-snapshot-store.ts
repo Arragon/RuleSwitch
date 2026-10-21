@@ -8,9 +8,11 @@
 // Invariants:
 // - Blob paths are always `files/<n>.bin`; anything else is rejected, so a
 //   tampered manifest cannot point outside the batch directory.
-// - Each file records the digest that apply WROTE. Rollback only restores when
-//   the current bytes still match it; a diverged file is reported instead of
-//   clobbered.
+// - Each file records the digest that apply WROTE plus the pre-apply digest.
+//   Rollback proceeds when the current bytes match either: the written digest
+//   means "restore the snapshot"; the pre-apply digest means the write never
+//   landed (mid-batch failure/crash) so nothing needs restoring. A diverged
+//   file is reported instead of clobbered.
 // - Target roots are stored absolute and never leave Main (no DTO exposes them).
 
 import { createHash } from "node:crypto";

@@ -4,7 +4,7 @@
 // confirmed, all registered harnesses at global scope).
 
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -414,6 +414,61 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     expect(batch?.rollbackAvailable).toBe(false);
     expect(batch?.rollbackReason).not.toBeNull();
     expect(batch?.targets.some((target) => target.state === "PREFLIGHT_FAILED")).toBe(true);
+  }, 90_000);
+
+  it("records a mid-batch write failure instead of escaping it, and keeps the earlier commit rollback-able", async () => {
+    const { repo, home, service } = await createService([
+      { harnessInstanceId: "harn_a", adapterId: "codex", displayName: "Codex", installed: true },
+      { harnessInstanceId: "harn_b", adapterId: "opencode", displayName: "OpenCode", installed: true }
+    ]);
+    await service.openRepositoryFromDirectory(repo);
+
+    const assets = [
+      { assetKey: "asset_agents", kind: "instructions" as const, logicalName: "AGENTS.md", content: new Uint8Array() }
+    ];
+    const targets = [{ harnessInstanceId: "harn_a" }, { harnessInstanceId: "harn_b" }];
+
+    const first = await service.applyToHarnesses({ assets, mode: "overwrite", targets });
+    expect(first.appliedCount).toBe(2);
+
+    // New revision so both targets need a write again; the second harness
+    // root becomes read-only so its write phase fails with a real EACCES.
+    await writeFile(path.join(repo, "global", "instructions", "AGENTS.md"), "# v2\n", "utf8");
+    const opencodeRoot = path.join(home, ".config", "opencode");
+    await chmod(opencodeRoot, 0o555);
+
+    let second: Awaited<ReturnType<typeof service.applyToHarnesses>>;
+    try {
+      second = await service.applyToHarnesses({ assets, mode: "overwrite", targets });
+    } finally {
+      await chmod(opencodeRoot, 0o755);
+    }
+
+    const byTarget = new Map(second.entries.map((entry) => [entry.harnessInstanceId, entry]));
+    // harn_a sorts first and commits; harn_b fails at the write phase.
+    expect(byTarget.get("harn_a")?.state).toBe("COMMITTED");
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# v2\n");
+    expect(byTarget.get("harn_b")?.state).toBe("APPLY_FAILED");
+    expect(byTarget.get("harn_b")?.detail).toMatch(/write failed/);
+    expect(second.failedCount).toBe(1);
+    expect(second.status).toBe("PARTIAL_SUCCESS");
+    // The read-only target keeps its pre-failure bytes — no partial write.
+    expect(await readFile(path.join(opencodeRoot, "AGENTS.md"), "utf8")).toBe("# global\n");
+
+    // The failure is visible on the recovery surface with honest rollback
+    // availability for the committed target — never unknown-but-writable.
+    const recovery = await service.recoveryStatus();
+    const batch = recovery.batches.find((entry) => entry.batchId === second.batchId);
+    expect(batch).toBeDefined();
+    expect(batch?.targets.some((target) => target.state === "APPLY_FAILED")).toBe(true);
+    expect(batch?.rollbackAvailable).toBe(true);
+
+    // Rolling the batch back restores the committed target's exact previous
+    // bytes; the failed target was never modified.
+    const rolledBack = await service.rollbackBatch(second.batchId);
+    expect(rolledBack.ok).toBe(true);
+    expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# global\n");
+    expect(await readFile(path.join(opencodeRoot, "AGENTS.md"), "utf8")).toBe("# global\n");
   }, 90_000);
 
   it("rolls back an applied target by deleting a file that did not exist", async () => {

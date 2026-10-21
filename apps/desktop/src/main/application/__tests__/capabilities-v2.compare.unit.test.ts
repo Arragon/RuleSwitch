@@ -155,4 +155,34 @@ describe("CapabilityServiceV2.setCompare (INH-1857)", () => {
       "identical"
     );
   }, 90_000);
+
+  it("repo-internal sync leaves unstaged working-tree changes only, never an automatic commit", async () => {
+    const { repo, service } = await createService();
+    await service.openRepositoryFromDirectory(repo);
+
+    const compare = await service.setCompare();
+    const review = compare?.diffs.find((diff) => diff.assetKey === "skills|review/SKILL.md");
+    const source = await service.readRepoFile(review!.sourceAssetKey!);
+    expect(source).not.toBeNull();
+    expect(
+      await service.editRepoFile(
+        review!.targetAssetKey!,
+        new Uint8Array(Buffer.from(source!.contentBase64, "base64"))
+      )
+    ).toBe(true);
+
+    // Acceptance (INH-1857 #4): 仓库内同步只生成 Git 未暂存更改；
+    // commit / push / apply 各自独立。Nothing staged, nothing committed.
+    const runtime = await createGitRuntime({ executable: "/usr/bin/git" });
+    const status = await runtime.run(["status", "--porcelain"], { cwd: repo });
+    // trimEnd only: porcelain encodes state in leading characters, and the
+    // unstaged-modification prefix is exactly " M " (space, M, space).
+    const lines = status.stdout.trimEnd().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe(" M global/native/codex/skills/review/SKILL.md");
+
+    // HEAD still holds the seeded bytes: the change lives in the worktree only.
+    const head = await runtime.run(["show", "HEAD:global/native/codex/skills/review/SKILL.md"], { cwd: repo });
+    expect(head.stdout).toBe("# native review\n");
+  }, 90_000);
 });
