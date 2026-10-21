@@ -199,3 +199,15 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 `rollbackAvailable` 额外要求批次至少一个 `COMMITTED` 目标：全预检失败的批次没有任何已提交目标，回滚 CTA 无意义（恢复面文案：「该批次没有已提交的目标，无需回滚」）。
 
 注入证据：`capabilities-v2.apply.unit.test.ts`「records a mid-batch write failure …」——第二 harness 根目录 chmod `0o555` 产生真实 EACCES；断言第一目标 COMMITTED 且可回滚、第二目标字节未动、回滚恢复精确字节。注意 `git status --porcelain` 断言必须 `trimEnd()` 而非 `trim()`：porcelain 把状态编码在**行首字符**（未暂存修改恰为 `" M "`），`trim()` 会把行首空格一并剥掉导致误判（见 INH-1857 验收 4 用例）。
+
+### 20. 回滚自身失败与状态落盘的持久性（2026-10-21 round 7）
+
+**回滚必须先验快照完整性，再动目标**。原实现读到 blob 后直接写入，写入后才比对 `previousDigest`：损坏/截断的 blob 会先把目标覆盖成无法自证的字节，然后才报失败。现顺序固定为「读 blob → 校验 `digest(blob) === previousDigest` → 写入 → 回读校验」，校验不过只记失败、目标不动。
+
+**回滚期间的 fs 错误不得逃逸**：恢复写入（temp + rename）、删除新建文件都包在 try/catch 内，失败计 `failed` 并把批次转为 `RECOVERY_REQUIRED`，而不是把异常抛给调用方。
+
+**按目标记账**：`restored`/`failed` 同时按 `targetKey` 累计。只有自身失败的目标标 `ROLLBACK_FAILED`；同一批次中已成功恢复的目标标 `ROLLED_BACK`（原实现用全局 failed>0 把所有 COMMITTED 目标一起改写，等于谎报）。没有快照文件记录的 COMMITTED 目标保持原状态，不声称回滚。
+
+**落盘持久性**：新增 `infrastructure/durable-write.ts` 的 `writeFileDurably()` —— 写临时文件 → `fsync` → `rename` → 目录 `fsync`（目录打开失败则跳过，文件本身已 sync）。journal/baseline/settings 存储与批次快照的 blob、manifest 全部改走它。原因：temp+rename 只保证「读者看不到半截文件」，不保证「rename 可见时数据块已落盘」；断电窗口内 recovery 可能读到不可信的 journal 或全零 blob。
+
+**证据边界（不夸大）**：进程级 SIGKILL 不会丢 page cache，因此 fsync 的断电语义在本环境**无法被测试证明**。`durable-write.unit.test.ts` 只证明可观察的性质：字节精确、原子替换、无临时残留、失败不破坏原文件、符号链接目标不被跟随。断电持久性属设计层保证，需真机断电/CI VM 才能取证。
