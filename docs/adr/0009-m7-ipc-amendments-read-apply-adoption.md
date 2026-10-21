@@ -179,3 +179,9 @@ M7 交互收口时又加入 4 个 purpose-built 通道与 1 个 store，仍全�
 - `IPC_V2_METHODS` 增至 **30**；`assertV2Surface` 期望值同步。
 - 新增 `tests/crash/crash-drill.child.test.ts` + `vitest.crash-drill.config.ts`（不匹配任何默认 glob，只被崩溃矩阵显式拉起）。
 - 崩溃矩阵进程级覆盖：子进程被 **SIGKILL** 真杀（非抛异常），父进程在磁盘上核对 journal / 快照 / 目标字节。
+
+### 18. 多仓库：`currentRoot()` 必须跟随“最近打开”的仓库
+
+- 原实现返回 `registry` 中**首个**注册仓库。打开第二个仓库后，所有 root-based 读（library 资产字节、`readRepoFile`、`setCompare`、inventory）仍读第一个仓库 —— 在跨仓库场景下会把 A 的字节当成 B 的字节写入本机工具。
+- 现由 `GitPortAdapter` 记录 `activeRepositoryId`（`open` / `clone` 时更新），`currentRoot()` 优先取 active；新增 `currentRepositoryId()`。
+- 所有权仍然按 (repositoryId, harnessInstanceId, targetPath) 判定：A 的 baseline 不会让 B 免接管，也不会授权 A 覆盖 B 写入后又被改动的文件（回归见 `capabilities-v2.ownership.unit.test.ts`）。

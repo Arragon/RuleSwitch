@@ -109,14 +109,27 @@ function err(
 
 export class GitPortAdapter implements GitPort {
   private readonly registry = new Map<RepositoryId, RegisteredRepository>();
+  /**
+   * The most recently opened repository. Root-based reads must follow it:
+   * with two repositories open, "the first one registered" would silently
+   * serve another repository's bytes.
+   */
+  private activeRepositoryId: RepositoryId | null = null;
 
-  /** Canonical root of an open repository (Main-side only; never a Renderer DTO). */
+  /** Canonical root of the active repository (Main-side only; never a Renderer DTO). */
   currentRoot(): string {
-    const first = this.registry.values().next();
-    if (first.done) {
+    const active =
+      this.activeRepositoryId === null ? undefined : this.registry.get(this.activeRepositoryId);
+    const resolved = active ?? this.registry.values().next().value;
+    if (resolved === undefined) {
       throw new Error("no repository is currently open");
     }
-    return first.value.localPath;
+    return resolved.localPath;
+  }
+
+  /** Id of the active repository, or null when none is open. */
+  currentRepositoryId(): RepositoryId | null {
+    return this.activeRepositoryId;
   }
 
   constructor(private readonly options: GitPortAdapterOptions) {}
@@ -656,6 +669,7 @@ export class GitPortAdapter implements GitPort {
     }
     const { repositoryId, canonicalRemote, canonicalRoot } = identityResult.value;
     this.registry.set(repositoryId, { repositoryId, localPath: canonicalRoot, canonicalRemote });
+    this.activeRepositoryId = repositoryId;
     if (this.options.identityStore) {
       await this.options.identityStore.bindRepository(repositoryId, canonicalRemote, canonicalRoot);
     }
