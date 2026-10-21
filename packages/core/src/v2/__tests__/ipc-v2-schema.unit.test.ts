@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { IPC_V2_REQUEST_SCHEMAS } from "../ipc-v2-channels";
+import { IPC_V2_CHANNELS, IPC_V2_REQUEST_SCHEMAS, type IpcV2Method } from "../ipc-v2-channels";
 
 const previewSchema = IPC_V2_REQUEST_SCHEMAS["apply.preview"];
 
@@ -85,4 +85,73 @@ describe("apply request schema (INH-1857 library apply)", () => {
       ).success
     ).toBe(true);
   });
+});
+
+/**
+ * Boundary audit: every channel must accept the payload the Renderer actually
+ * sends. A schema stricter than the implementation is invisible to service
+ * tests (they bypass the boundary) and shows up as a dead feature in the app,
+ * which is exactly how the library apply path and the empty-file save broke.
+ *
+ * The table is keyed by channel name and asserted to cover EVERY channel, so
+ * adding a channel without auditing its boundary fails this test.
+ */
+const UI_PAYLOADS: Record<IpcV2Method, unknown> = {
+  "repository.openFromDirectory": { directory: "/tmp/config-repo" },
+  "repository.clone": { remoteUrl: "git@example.com:you/config.git", targetDirectory: "/tmp/clone-target" },
+  "repository.status": {},
+  "repository.validate": {},
+  "library.browse": {},
+  "library.readFile": { logicalPath: "global/instructions/AGENTS.md" },
+  // Clearing a file: the Renderer base64-encodes "" as "".
+  "library.editFile": { logicalPath: "global/instructions/AGENTS.md", contentBase64: "" },
+  "library.deleteAsset": { logicalPaths: ["global/instructions/AGENTS.md"], confirmed: true },
+  "changes.gitArea": {},
+  "changes.setCompare": {},
+  "changes.stage": { logicalPaths: ["global/instructions/AGENTS.md"] },
+  "changes.unstage": { logicalPaths: ["global/instructions/AGENTS.md"] },
+  "changes.commit": { message: "chore: sync" },
+  "changes.push": {},
+  "changes.fetch": {},
+  "changes.fastForward": {},
+  // First page has no cursor.
+  "changes.log": { cursor: null, pageSize: 50 },
+  "projects.list": {},
+  "projects.bind": {
+    projectId: "prj_0123456789abcdef0123456789abcdef",
+    displayName: "示例项目",
+    localPath: "/tmp/example-project"
+  },
+  "projects.unbind": { projectId: "prj_0123456789abcdef0123456789abcdef" },
+  "harnesses.list": {},
+  "harnesses.scan": { harnessInstanceId: "harn_codex" },
+  "history.operations": {},
+  "history.recovery": {},
+  "operations.rollback": { batchId: "batch-1750000000000" },
+  "settings.get": {},
+  "settings.setTheme": { theme: "dark" },
+  "apply.preview": libraryApplyRequest(),
+  "apply.diff": libraryApplyRequest({ targetKey: "harn_codex|global|instructions", planRevision: "rev" }),
+  "apply.toHarnesses": libraryApplyRequest({ planRevision: "rev" })
+};
+
+describe("IPC v2 boundary audit (all channels)", () => {
+  it("covers every channel exactly once", () => {
+    const channels = Object.keys(IPC_V2_CHANNELS) as IpcV2Method[];
+    expect(Object.keys(UI_PAYLOADS).sort()).toEqual([...channels].sort());
+    expect(Object.keys(IPC_V2_REQUEST_SCHEMAS).sort()).toEqual([...channels].sort());
+  });
+
+  it.each(Object.keys(IPC_V2_CHANNELS) as IpcV2Method[])(
+    "accepts the Renderer payload for %s",
+    (method) => {
+      const schema = IPC_V2_REQUEST_SCHEMAS[method];
+      const parsed = schema.safeParse(UI_PAYLOADS[method]);
+      if (!parsed.success) {
+        // Surface the Zod path so a failure names the offending field.
+        throw new Error(`${method}: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(",")}`);
+      }
+      expect(parsed.success).toBe(true);
+    }
+  );
 });

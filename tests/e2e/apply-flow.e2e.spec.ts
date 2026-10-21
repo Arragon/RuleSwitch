@@ -122,6 +122,19 @@ test("applies a repository asset to a registered harness through preview, diff a
     await expect(outcome).toContainText("已应用 1");
 
     expect(await readFile(path.join(home, ".codex", "AGENTS.md"), "utf8")).toBe("# global from repo\n");
+
+    // 6) Clearing a repository file must also work: the boundary used to
+    //    reject an empty base64 payload, so "save an emptied file" failed in
+    //    the app while the service happily wrote zero bytes.
+    await library.locator("li", { hasText: "AGENTS.md" }).locator('button:has-text("编辑")').click();
+    const editor = library.getByRole("group", { name: "编辑仓库文件" });
+    await expect(editor).toBeVisible();
+    await editor.getByRole("textbox", { name: "文件内容" }).fill("");
+    await editor.locator('button:has-text("保存到工作树")').click();
+    // Shell-level feedback is visible on every page (it used to render only
+    // inside the changes page, so a library save looked like a no-op).
+    await expect(page.locator(".app-v2-message")).toContainText("已保存");
+    expect(await readFile(path.join(repo, "global", "instructions", "AGENTS.md"), "utf8")).toBe("");
   } finally {
     await electronApp.close();
     await rm(root, { recursive: true, force: true });

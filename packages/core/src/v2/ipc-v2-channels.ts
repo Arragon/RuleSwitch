@@ -271,7 +271,13 @@ export const IPC_V2_REQUEST_SCHEMAS: Record<IpcV2Method, z.ZodTypeAny> = Object.
   "library.readFile": z.strictObject({ logicalPath: z.string().trim().min(1) }),
   "library.editFile": z.strictObject({
     logicalPath: z.string().trim().min(1),
-    contentBase64: z.string().min(1)
+    /**
+     * Base64 of the whole file. EMPTY is legal: clearing a file is a normal
+     * edit, and the Renderer encodes "" as "". Requiring min(1) here would
+     * make "save an emptied file" fail at the boundary while the Main
+     * implementation happily writes zero bytes.
+     */
+    contentBase64: z.string()
   }),
   "library.deleteAsset": z.strictObject({
     logicalPaths: z.array(z.string().trim().min(1)).min(1),

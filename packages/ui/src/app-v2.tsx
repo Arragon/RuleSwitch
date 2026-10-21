@@ -563,6 +563,14 @@ export function AppV2({ api }: AppV2Props) {
             {error}
           </p>
         )}
+        {message.length > 0 && (
+          // Shell-level feedback: every page must be able to confirm an action
+          // (save, delete, preview) without the user hunting for the changes
+          // page.
+          <p className="app-v2-message" role="status">
+            {message}
+          </p>
+        )}
         {busy && <p aria-live="polite">处理中…</p>}
 
         {page === "overview" && (
@@ -1392,7 +1400,6 @@ export function AppV2({ api }: AppV2Props) {
                 Fast-forward Pull
               </button>
             </div>
-            {message && <p aria-live="polite">{message}</p>}
             <h3>提交记录</h3>
             <button
               type="button"
