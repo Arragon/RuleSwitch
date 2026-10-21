@@ -118,4 +118,35 @@ test.describe("AppV2 shell navigation & a11y (INH-1818)", () => {
     await expect(library).toContainText("应用到本机工具");
     await expect(library).toContainText(/尚未登记本机工具|不会被自动配置/);
   });
+
+  test("every rendered control exposes an accessible name and the document declares a language", async () => {
+    // A hand-rolled accessibility gate (no axe dependency available offline):
+    // an unlabeled control is invisible to assistive technology, and a missing
+    // lang attribute breaks screen-reader pronunciation.
+    await page.locator(".app-v2-nav").locator('button:has-text("Overview")').click();
+    expect(await page.locator("html").getAttribute("lang")).toBe("en");
+
+    const unnamed = await page.evaluate(() => {
+      const problems: string[] = [];
+      const controls = document.querySelectorAll("button, input, select, textarea, a[href]");
+      for (const control of Array.from(controls)) {
+        const label = (
+          control.getAttribute("aria-label") ??
+          control.textContent ??
+          control.getAttribute("placeholder") ??
+          control.getAttribute("title") ??
+          ""
+        ).trim();
+        if (label.length === 0) {
+          problems.push(`${control.tagName}.${control.className}`);
+        }
+      }
+      return problems;
+    });
+    expect(unnamed).toEqual([]);
+
+    // A screenshot keeps a visual record for reviewers; it is not a pixel
+    // baseline (rendering differs per OS, so no diff assertion is made).
+    await page.screenshot({ path: "outputs/screenshots/v2-shell.png" });
+  });
 });
