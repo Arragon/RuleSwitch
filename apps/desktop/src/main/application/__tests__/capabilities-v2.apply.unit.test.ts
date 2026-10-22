@@ -10,6 +10,8 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { HarnessFileDto } from "@ruleswitch/core";
+
 import { CapabilityServiceV2 } from "../../application/capabilities-v2";
 import { GitPortAdapter } from "../../infrastructure/git/git-port-adapter";
 import { createGitRuntime } from "../../infrastructure/git/git-runtime";
@@ -729,6 +731,42 @@ describe("CapabilityServiceV2.applyToHarnesses (INH-1852)", () => {
     // Nothing is managed before RuleSwitch writes anything.
     expect(scan?.managedCount).toBe(0);
     expect(scan?.unclassifiedCount).toBe(1);
+  }, 90_000);
+
+  it("distinguishes matched, modified and unmanaged files by relation (INH-1854 acceptance 1)", async () => {
+    const { repo, home, service } = await createService([codexRegistration]);
+    await service.openRepositoryFromDirectory(repo);
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# local\n", "utf8");
+    await writeFile(path.join(home, ".codex", "notes.txt"), "unrelated\n", "utf8");
+
+    await service.applyToHarnesses({
+      assets: [
+        { assetKey: "asset_agents", kind: "instructions", logicalName: "AGENTS.md", content: new Uint8Array() }
+      ],
+      mode: "overwrite",
+      confirmAdoption: true,
+      targets: [{ harnessInstanceId: "harn_codex" }]
+    });
+
+    const byPath = (files: readonly Pick<HarnessFileDto, "relativePath" | "relation">[]) =>
+      new Map(files.map((file) => [file.relativePath, file.relation]));
+
+    // Fresh from apply: the file holds exactly the baseline bytes.
+    let scan = await service.scanHarness("harn_codex");
+    let relation = byPath(scan?.files ?? []);
+    expect(relation.get("AGENTS.md")).toBe("matched");
+    expect(relation.get("notes.txt")).toBe("unmanaged");
+    expect(scan?.modifiedCount).toBe(0);
+
+    // A local edit after the apply is drift: "本机有修改", not "已同步".
+    await writeFile(path.join(home, ".codex", "AGENTS.md"), "# local edit after apply\n", "utf8");
+    scan = await service.scanHarness("harn_codex");
+    relation = byPath(scan?.files ?? []);
+    expect(relation.get("AGENTS.md")).toBe("modified");
+    expect(scan?.modifiedCount).toBe(1);
+    // `managed` stays true: a baseline still exists; relation carries the truth.
+    expect(scan?.files.find((file) => file.relativePath === "AGENTS.md")?.managed).toBe(true);
   }, 90_000);
 
   it("marks a file managed only after a verified apply recorded a baseline", async () => {

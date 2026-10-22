@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   groupLibraryEntries,
+  harnessRelationLabel,
+  harnessScanSummary,
   librarySummary,
   overviewStatusLines,
   relationLabel,
@@ -9,7 +11,13 @@ import {
   splitGitChanges,
   NAV_PAGES
 } from "../app-v2-model";
-import type { GitAreaReadModel, LibraryReadModel, OverviewReadModel, SetCompareReadModel } from "@ruleswitch/core";
+import type {
+  GitAreaReadModel,
+  HarnessScanReadModel,
+  LibraryReadModel,
+  OverviewReadModel,
+  SetCompareReadModel
+} from "@ruleswitch/core";
 
 function library(overrides: Partial<LibraryReadModel> = {}): LibraryReadModel {
   return {
@@ -108,5 +116,30 @@ describe("v2 UI read-model helpers (INH-1808/1810/1811)", () => {
       ]
     };
     expect(setCompareSummary(compare)).toContain("无可信共同基线");
+  });
+});
+
+describe("harness scan labels (INH-1854)", () => {
+  it("maps the three relations to honest labels", () => {
+    expect(harnessRelationLabel("matched")).toBe("与基线一致");
+    expect(harnessRelationLabel("modified")).toBe("本机有修改");
+    expect(harnessRelationLabel("unmanaged")).toBe("本机自有");
+  });
+
+  it("summary never hides the modified count and surfaces truncation", () => {
+    const scan: HarnessScanReadModel = {
+      harnessInstanceId: "harn_codex",
+      adapterId: "codex",
+      displayName: "Codex",
+      rootPresent: true,
+      scannedAt: "2026-10-22T06:00:00.000Z",
+      truncated: false,
+      files: [],
+      managedCount: 3,
+      modifiedCount: 1,
+      unclassifiedCount: 2
+    };
+    expect(harnessScanSummary(scan)).toBe("已纳管 3 · 本机有修改 1 · 未分类 2");
+    expect(harnessScanSummary({ ...scan, truncated: true })).toContain("结果已截断");
   });
 });

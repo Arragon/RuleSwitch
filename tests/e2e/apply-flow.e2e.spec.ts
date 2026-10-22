@@ -150,6 +150,16 @@ test("applies a repository asset to a registered harness through preview, diff a
 
     expect(await readFile(path.join(env.home, ".codex", "AGENTS.md"), "utf8")).toBe("# global from repo\n");
 
+    // The applied file scans back as baseline-equal, not just "managed".
+    await page.locator(".app-v2-nav").locator('button:has-text("本机 AI 工具")').click();
+    const harnessesPage = page.locator('section[aria-label="本机 AI 工具"]');
+    await harnessesPage.locator('button:has-text("扫描本机")').click();
+    const scanResult = harnessesPage.getByRole("status", { name: "本机扫描结果" });
+    await expect(scanResult).toContainText("已纳管 1 · 本机有修改 0");
+    await expect(scanResult.locator("li", { hasText: "AGENTS.md" })).toContainText("与基线一致");
+
+    await page.locator(".app-v2-nav").locator('button:has-text("配置库")').click();
+
     // Clearing a repository file must also work: the boundary used to reject
     // an empty base64 payload, so "save an emptied file" failed in the app
     // while the service happily wrote zero bytes.
@@ -228,6 +238,15 @@ test("refuses to apply over a target the user changed after the preview", async 
     await expect(outcome).toContainText("失败 1");
     await expect(outcome).toContainText("已应用 0");
     expect(await readFile(path.join(env.home, ".codex", "AGENTS.md"), "utf8")).toBe("# user edit\n");
+
+    // The same drift is honest on the harness page: 本机有修改, not 与基线一致.
+    await page.locator(".app-v2-nav").locator('button:has-text("本机 AI 工具")').click();
+    const harnessesPage = page.locator('section[aria-label="本机 AI 工具"]');
+    await harnessesPage.locator('button:has-text("扫描本机")').click();
+    const scanResult = harnessesPage.getByRole("status", { name: "本机扫描结果" });
+    await expect(scanResult).toBeVisible();
+    await expect(scanResult).toContainText("本机有修改 1");
+    await expect(scanResult.locator("li", { hasText: "AGENTS.md" })).toContainText("本机有修改");
   } finally {
     await electronApp.close();
     await rm(env.root, { recursive: true, force: true });

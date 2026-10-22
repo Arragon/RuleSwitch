@@ -4,6 +4,8 @@
 
 import type {
   GitAreaReadModel,
+  HarnessFileRelation,
+  HarnessScanReadModel,
   LibraryEntryDto,
   LibraryReadModel,
   OverviewReadModel,
@@ -111,6 +113,31 @@ export function relationLabel(relation: SetCompareReadModel["diffs"][number]["re
     case "unsupported":
       return "不支持";
   }
+}
+
+/** Harness scan: honest per-file labels against the recorded baseline (INH-1854). */
+export function harnessRelationLabel(relation: HarnessFileRelation): string {
+  switch (relation) {
+    case "matched":
+      return "与基线一致";
+    case "modified":
+      return "本机有修改";
+    case "unmanaged":
+      return "本机自有";
+  }
+}
+
+/** One-line summary of a harness scan; the modified count is never hidden. */
+export function harnessScanSummary(scan: HarnessScanReadModel): string {
+  const parts = [
+    `已纳管 ${scan.managedCount}`,
+    `本机有修改 ${scan.modifiedCount}`,
+    `未分类 ${scan.unclassifiedCount}`
+  ];
+  if (scan.truncated) {
+    parts.push("结果已截断");
+  }
+  return parts.join(" · ");
 }
 
 export function setCompareSummary(compare: SetCompareReadModel | null): string {

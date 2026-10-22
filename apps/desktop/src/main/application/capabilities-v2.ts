@@ -644,6 +644,7 @@ export class CapabilityServiceV2 {
         truncated: false,
         files: [],
         managedCount: 0,
+        modifiedCount: 0,
         unclassifiedCount: 0
       };
     }
@@ -656,6 +657,7 @@ export class CapabilityServiceV2 {
         truncated: false,
         files: [],
         managedCount: 0,
+        modifiedCount: 0,
         unclassifiedCount: 0
       };
     }
@@ -664,19 +666,30 @@ export class CapabilityServiceV2 {
     const mapped: HarnessFileDto[] = [];
     for (const file of files) {
       const digest = digestBytes(file.content);
+      const baseline =
+        this.options.baselineStore !== undefined && this.openRepositoryId !== null
+          ? this.options.baselineStore.find(
+              this.openRepositoryId,
+              registration.harnessInstanceId,
+              file.relativePath
+            )
+          : null;
+      // "managed" only proves we once wrote the file; the relation proves what
+      // the bytes look like now (INH-1854 acceptance 1: 本机修改 must be
+      // visible, not flattened into "管理").
+      const relation =
+        baseline === null
+          ? ("unmanaged" as const)
+          : baseline.outputDigest === digest
+            ? ("matched" as const)
+            : ("modified" as const);
       mapped.push({
         relativePath: file.relativePath,
         byteLength: file.content.byteLength,
         digest,
         kind: classifyHarnessPath(file.relativePath),
-        managed:
-          this.options.baselineStore !== undefined && this.openRepositoryId !== null
-            ? this.options.baselineStore.find(
-                this.openRepositoryId,
-                registration.harnessInstanceId,
-                file.relativePath
-              ) !== null
-            : false
+        managed: baseline !== null,
+        relation
       });
     }
     mapped.sort((left, right) => (left.relativePath < right.relativePath ? -1 : 1));
@@ -686,6 +699,7 @@ export class CapabilityServiceV2 {
       truncated,
       files: mapped,
       managedCount: mapped.filter((file) => file.managed).length,
+      modifiedCount: mapped.filter((file) => file.relation === "modified").length,
       unclassifiedCount: mapped.filter((file) => file.kind === null).length
     };
   }

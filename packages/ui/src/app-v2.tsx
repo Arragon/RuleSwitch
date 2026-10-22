@@ -25,6 +25,8 @@ import { NAV_PAGES, type NavPage } from "./app-v2-model";
 import { ConfirmDialog, type DialogRequest } from "./dialog";
 import {
   groupLibraryEntries,
+  harnessRelationLabel,
+  harnessScanSummary,
   librarySummary,
   overviewStatusLines,
   relationLabel,
@@ -1119,8 +1121,8 @@ export function AppV2({ api }: AppV2Props) {
           <section aria-label="本机 AI 工具">
             <h1>本机 AI 工具</h1>
             <p className="app-v2-hint">
-              这里只展示本机已登记的真实工具与它们实际可写的配置类型。完整的分文件本地状态
-              与 Capture 入口属于 INH-1854，尚未接入。
+              这里展示本机已登记的真实工具与它们实际可写的配置类型；“扫描本机”按文件列出
+              与基线一致 / 本机有修改 / 本机自有三种状态。Capture 入口属于 INH-1854 后续，尚未接入。
             </p>
             {harnesses.length === 0 ? (
               <p>尚未登记本机工具。在向导中检测已安装工具；未登记的工具不会被自动配置。</p>
@@ -1169,9 +1171,8 @@ export function AppV2({ api }: AppV2Props) {
             {harnessScan !== null && (
               <div className="app-v2-outcome" role="status" aria-label="本机扫描结果">
                 <p>
-                  {harnessScan.displayName} · 扫描于 {harnessScan.scannedAt.slice(0, 19)} ·
-                  已纳管 {harnessScan.managedCount} · 未分类 {harnessScan.unclassifiedCount}
-                  {harnessScan.truncated ? " · 结果已截断" : ""}
+                  {harnessScan.displayName} · 扫描于 {harnessScan.scannedAt.slice(0, 19)} ·{" "}
+                  {harnessScanSummary(harnessScan)}
                 </p>
                 {!harnessScan.rootPresent ? (
                   <p>未发现该工具的全局目录（可能尚未安装或使用自定义位置）。</p>
@@ -1182,7 +1183,7 @@ export function AppV2({ api }: AppV2Props) {
                     {harnessScan.files.map((file) => (
                       <li key={file.relativePath}>
                         {file.relativePath} · {file.byteLength} B ·{" "}
-                        {file.kind ?? "未分类"} · {file.managed ? "RuleSwitch 管理" : "本机自有"}
+                        {file.kind ?? "未分类"} · {harnessRelationLabel(file.relation)}
                       </li>
                     ))}
                   </ul>

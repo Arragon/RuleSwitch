@@ -92,6 +92,9 @@ export interface ProjectDto {
   readonly remoteVerified: "matched" | "mismatch" | "unknown";
 }
 
+/** How a harness file compares to the bytes RuleSwitch last wrote (INH-1854). */
+export type HarnessFileRelation = "matched" | "modified" | "unmanaged";
+
 /** One real file found under a harness root (INH-1854). */
 export interface HarnessFileDto {
   /** Path relative to the harness root; never absolute. */
@@ -102,6 +105,13 @@ export interface HarnessFileDto {
   readonly kind: string | null;
   /** True only when a SyncBaseline proves RuleSwitch wrote this file. */
   readonly managed: boolean;
+  /**
+   * Comparison against the recorded baseline bytes: `matched` means the file
+   * still holds exactly what the last apply wrote; `modified` means the user
+   * (or the tool) changed it afterwards — a real drift, not "in sync";
+   * `unmanaged` means RuleSwitch never wrote this file.
+   */
+  readonly relation: HarnessFileRelation;
 }
 
 export interface HarnessScanReadModel {
@@ -113,6 +123,8 @@ export interface HarnessScanReadModel {
   readonly truncated: boolean;
   readonly files: readonly HarnessFileDto[];
   readonly managedCount: number;
+  /** Managed files whose bytes no longer equal the recorded baseline. */
+  readonly modifiedCount: number;
   readonly unclassifiedCount: number;
 }
 
